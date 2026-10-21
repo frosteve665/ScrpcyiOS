@@ -206,6 +206,37 @@ class HevcDecoder:
         return list(self.ctx.decode(pkt))
 
 
+class RecoveryPolicy:
+    """Decides how to react to decode errors without hammering the iPhone's encoder.
+
+    Evidence: the device may ignore PLI/FIR after the first IDR (rPlayHub notes) and a PLI barrage
+    can corrupt the encoder on iOS 26/27 (pymobiledevice3 source comments). So: at most `max_pli`
+    keyframe requests spaced `pli_interval` apart, then a session restart, itself rate-limited.
+    """
+
+    def __init__(self, pli_interval: float = 2.0, max_pli: int = 2, restart_interval: float = 10.0):
+        self.pli_interval, self.max_pli, self.restart_interval = pli_interval, max_pli, restart_interval
+        self._plis = 0
+        self._last_action: Optional[float] = None
+        self._last_restart = float("-inf")
+
+    def on_error(self, now: float) -> str:
+        if self._last_action is not None and now - self._last_action < self.pli_interval:
+            return "wait"
+        if self._plis < self.max_pli:
+            self._plis += 1
+            self._last_action = now
+            return "pli"
+        if now - self._last_restart >= self.restart_interval:
+            self._plis = 0
+            self._last_restart = self._last_action = now
+            return "restart"
+        return "wait"
+
+    def on_healthy(self) -> None:
+        self._plis = 0
+
+
 class VideoSession:
     """Pulls /stream.bin, decodes, and keeps the newest frame (drops stale ones)."""
 
@@ -214,6 +245,8 @@ class VideoSession:
         self.latest = None
         self.frames = 0
         self.last_error: Optional[str] = None
+        self.policy = RecoveryPolicy()
+        self._good = 0
         self._stop = threading.Event()
         self._cond = threading.Condition()
         self._thread: Optional[threading.Thread] = None
@@ -255,14 +288,21 @@ class VideoSession:
                             with self._cond:
                                 self.latest, self.frames = f, self.frames + 1
                                 self._cond.notify_all()
-                    except Exception as exc:  # decoder error: ask for a fresh keyframe
+                            self._good += 1
+                            if self._good >= 30:
+                                self.policy.on_healthy()
+                                self._good = 0
+                    except Exception as exc:  # decoder error: rate-limited recovery
                         self.last_error = str(exc)
+                        self._good = 0
                         need_key = True
                         dec.reset()
-                        try:
-                            self.api.request("POST", "/pli")
-                        except OSError:
-                            pass
+                        action = self.policy.on_error(time.monotonic())
+                        if action != "wait":
+                            try:
+                                self.api.request("POST", "/pli" if action == "pli" else "/restart")
+                            except OSError:
+                                pass
             except (OSError, http.client.HTTPException, BridgeError) as exc:
                 self.last_error = str(exc)
             if self._stop.wait(backoff):

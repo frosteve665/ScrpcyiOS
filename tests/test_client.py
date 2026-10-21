@@ -1,13 +1,10 @@
-import io, os, time, pytest
+import io, time, pytest
 from mock_bridge import MockBridge, PASSWORD, frame_msg
 import ios_client as c
 
-MP4 = os.environ.get("TEST_HEVC", "/tmp/claude-0/-home-claude/827b8506-7f8d-549a-86db-6d0c20cc3f92/scratchpad/media/t.mp4")
-
-
 @pytest.fixture
-def mock():
-    m = MockBridge(MP4)
+def mock(hevc_mp4):
+    m = MockBridge(hevc_mp4)
     yield m
     m.close()
 

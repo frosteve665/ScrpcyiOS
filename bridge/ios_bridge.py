@@ -150,9 +150,7 @@ async def run(args) -> None:
                 motion_idr=not args.no_motion_idr,
             )
             if args.no_audio:
-                original = server._ensure_fresh_stream
-
-                async def video_only() -> None:
+                async def video_only(original=server._ensure_fresh_stream) -> None:
                     try:
                         await original(force=False)
                     except Exception as exc:  # retried lazily on /codec

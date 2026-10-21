@@ -1,0 +1,59 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * 1"   # weekly canary against the newest pymobiledevice3
+  workflow_dispatch:
+    inputs:
+      hil:
+        description: "Run hardware-in-the-loop smoke test (needs a self-hosted runner with an iPhone)"
+        type: boolean
+        default: false
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install ruff
+      - run: ruff check .
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q tests
+
+  canary:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - run: pip install --upgrade pymobiledevice3
+      - run: pip freeze | grep -i pymobiledevice3
+      - name: API contract and HID report layout against the newest pymobiledevice3
+        run: python -m pytest -q tests/test_pmd_contract.py tests/test_mt_reports.py
+
+  hil:
+    if: github.event_name == 'workflow_dispatch' && inputs.hil
+    runs-on: [self-hosted, windows, iphone]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install -r requirements.txt
+      - run: python tools/smoke_test.py --frames 120

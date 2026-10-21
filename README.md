@@ -1,27 +1,28 @@
 # ScrpcyiOS
 
-scrcpy-style iPhone mirroring + control for PC. Plug in USB, see the screen, tap/swipe/type from the PC.
-Requires iOS 17.4+, Developer Mode, Trust, and "Apple Devices" (or iTunes) on Windows.
+iPhone engine for StrikeMirror: scrcpy-style mirroring and control of an iPhone from a Windows PC over USB.
+Requires Developer Mode, Trust, and "Apple Devices" (or iTunes) on Windows. **Minimum iOS version is not yet established** (sources disagree: 17.4 vs 27; see `docs/RESEARCH.md` #4). Sprint 0 measures it.
 
 ```
-bridge/ios_bridge.py   GPL-3.0 process (wraps pymobiledevice3: tunnel + CoreDevice display/HID service)
-client/                no pymobiledevice3 import; HTTP client, HEVC decode (PyAV), input, player window
-tests/                 mock bridge + 26 tests (real HEVC decode path), run: pytest -q tests
+bridge/    GPL-3.0 process wrapping pymobiledevice3 (tunnel + CoreDevice display/HID). Talks HTTP on 127.0.0.1.
+client/    No pymobiledevice3 import. HTTP client, HEVC decode (PyAV), input, recovery policy, Tk player.
+tools/     smoke_test.py (hardware smoke test), see bridge/multitouch_probe.py for the 2-finger experiment.
+tests/     47 tests: mock bridge with real HEVC, framing, recovery, HID report layout, pymobiledevice3 API contract.
+docs/      PROTOCOL.md, SPRINTS.md, RESEARCH.md, DEVICE-MATRIX.md, superpowers/specs/ (design with flowcharts + ERD)
 ```
 
-## Run (PC with iPhone)
+## Try it (PC + iPhone)
 ```
-pip install pymobiledevice3 av pillow
-python client/player.py            # add --udid <UDID> if several phones
+pip install -r requirements.txt
+python client/player.py              # window: mouse = finger, right click = Home, F1..F8 shortcuts
+python tools/smoke_test.py           # prints a JSON report, exit code 0 = pass
 ```
-Mouse = finger, right click = Home, keyboard = iPhone hardware keyboard.
-Ctrl+A/C/V/X/Z -> Cmd+key (C/V sync clipboard). F1 Home, F2 Lock, F3/F4 Volume, F5 screenshot, F6/F7 rotate, F8 restart.
 
 ## Status (honest)
-- Verified: client, framing, HEVC decode, input queue, key mapping, error mapping (mock tests).
-- NOT yet verified on a real iPhone: tunnel start, video latency, touch/button/key delivery.
-- Single finger only. Second pointer is ignored until multitouch is proven (`InputController(multitouch=True)`).
-- TODO: Wi-Fi transport, audio playback (bridge supports /audio.bin), recording, multitouch probe, packaging.
+- Verified by automated tests (no iPhone): framing, HEVC decode path, input queue, key mapping, error mapping, HID report layout (byte-identical to pymobiledevice3), recovery policy, API contract.
+- **Not verified on a real iPhone:** tunnel, video latency, touch/button/key delivery, audio, clipboard, rotation.
+- Touch is one finger. Second pointer is ignored until `bridge/multitouch_probe.py` proves more.
+- Plan: `docs/SPRINTS.md`. Design: `docs/superpowers/specs/2026-10-21-ios-engine-design.md` (draft, awaiting owner review).
 
 ## License
-`bridge/` is GPL-3.0 (imports pymobiledevice3). Keep `client/` free of pymobiledevice3 imports.
+`bridge/` is GPL-3.0 (imports pymobiledevice3). Keep `client/` free of pymobiledevice3 imports. Legal review of the process boundary is planned before any commercial release.
