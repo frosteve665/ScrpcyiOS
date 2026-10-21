@@ -213,7 +213,7 @@ def main() -> int:
         info = dev.connect()
     except BridgeError as exc:
         print(f"[{exc.code}] {exc}")
-        return 1
+        return 3  # distinct exit code: the frozen smoke test relies on it
     Player(dev, f"StrikeMirror iOS — {info.ios}", compensate=not args.no_compensate).run()
     return 0
 

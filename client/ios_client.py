@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import http.client
 import json
+import os
 import queue
 import subprocess
 import sys
@@ -36,14 +37,34 @@ class BridgeInfo:
     ios: str
 
 
+BRIDGE_EXE = "strikemirror-bridge.exe" if sys.platform == "win32" else "strikemirror-bridge"
+
+
+def default_bridge_cmd() -> list[str]:
+    """How to launch the bridge: $STRIKEMIRROR_BRIDGE, else the frozen sibling exe, else the script."""
+    override = os.environ.get("STRIKEMIRROR_BRIDGE")
+    if override:
+        return [override]
+    if getattr(sys, "frozen", False):
+        here = Path(sys.executable).resolve().parent
+        for cand in (here.parent / "strikemirror-bridge" / BRIDGE_EXE, here / BRIDGE_EXE):
+            if cand.exists():
+                return [str(cand)]
+        raise BridgeError("bridge_missing", f"{BRIDGE_EXE} tidak ditemukan di samping player.")
+    return [sys.executable, str(Path(__file__).resolve().parent.parent / "bridge" / "ios_bridge.py")]
+
+
 class BridgeProcess:
     """Starts the bridge subprocess and waits for its 'ready' (or 'error') event."""
 
     def __init__(self, udid: Optional[str] = None, python: Optional[str] = None,
                  bridge_path: Optional[Path] = None, extra_args: Optional[list[str]] = None,
                  on_status: Optional[Callable[[dict], None]] = None):
-        self.cmd = [python or sys.executable,
-                    str(bridge_path or Path(__file__).resolve().parent.parent / "bridge" / "ios_bridge.py")]
+        if python or bridge_path:
+            self.cmd = [python or sys.executable,
+                        str(bridge_path or Path(__file__).resolve().parent.parent / "bridge" / "ios_bridge.py")]
+        else:
+            self.cmd = default_bridge_cmd()
         if udid:
             self.cmd += ["--udid", udid]
         self.cmd += extra_args or []
@@ -59,7 +80,8 @@ class BridgeProcess:
             if self._closed:
                 raise BridgeError("closed", "Bridge sudah ditutup.")
             self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
+                                         stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         try:
             info = self._await_ready(timeout)
         except BridgeError:

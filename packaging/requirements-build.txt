@@ -1,0 +1,8 @@
+# Exact pins for release builds. pymobiledevice3 is pinned to the version the contract tests
+# (tests/test_pmd_contract.py) and docs/PROTOCOL.md were verified against; bump it only after the
+# canary CI job passes on the new version.
+pymobiledevice3==11.40.2
+av==19.0.2
+pillow==13.0.0
+numpy==2.5.4
+pyinstaller==6.22.3

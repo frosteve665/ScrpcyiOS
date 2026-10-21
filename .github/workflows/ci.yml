@@ -44,6 +44,27 @@ jobs:
         if: runner.os != 'Linux'
         run: python -m pytest -q -rfs tests
 
+  package-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r packaging/requirements-build.txt
+      - name: Build bridge.exe and player.exe (separate, license boundary)
+        run: python packaging/build.py
+      - name: Smoke-test the frozen builds without an iPhone
+        run: python tools/frozen_smoke.py dist
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/strikemirror-bridge, dist/strikemirror-player, README.md -DestinationPath ScrpcyiOS-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScrpcyiOS-windows-x64
+          path: ScrpcyiOS-windows-x64.zip
+          retention-days: 30
+
   canary:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
