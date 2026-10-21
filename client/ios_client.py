@@ -247,9 +247,17 @@ class BridgeSupervisor:
 # --------------------------------------------------------------------------- HTTP
 def abort_socket(sock: Optional[socket.socket]) -> None:
     """Unblock a thread waiting on this socket (stop() of a streaming reader or a long-poll)."""
-    if sock is not None:
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)   # wakes a blocked recv() on Linux/macOS
+    except OSError:
+        pass
+    if sys.platform == "win32":
+        # Windows only wakes a blocked recv() on closesocket(). socket.close() is a no-op while
+        # http.client's makefile() still holds a reference, so close the handle itself.
         try:
-            sock.shutdown(socket.SHUT_RDWR)
+            getattr(sock, "_real_close", sock.close)()
         except OSError:
             pass
 
