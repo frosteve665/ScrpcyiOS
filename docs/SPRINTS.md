@@ -37,6 +37,7 @@ gantt
 ## S1: Pengerasan inti
 - Perbaiki temuan S0; siklus hidup bridge (matikan proses yatim, port bentrok); cabut-colok otomatis tersambung lagi; log berputar.
 - Pemetaan koordinat saat layar diputar; scroll mouse menjadi swipe; F11 fullscreen; tombol MOD ala scrcpy.
+- **Status kode (belum terverifikasi di iPhone):** lifecycle bridge, supervisor respawn, log berputar, MOD/F11, scroll, kompensasi crop "layar menyusut" selesai dan teruji otomatis. Sisa: temuan S0 dan uji keluar (30 menit, 3x cabut-colok).
 - **Keluar jika:** 30 menit tanpa intervensi, 3 kali cabut-colok pulih sendiri.
 
 ## S2: Integrasi StrikeMirror (Rust)

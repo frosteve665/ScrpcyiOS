@@ -6,7 +6,7 @@ Status per item: **verified** = read from pymobiledevice3 11.40.2 source and exe
 ## 1. Launch and events (stdout, one JSON object per line)
 
 ```
-bridge/ios_bridge.py [--udid UDID] [--port N] [--no-audio] [--no-motion-idr] [--max-bitrate KBPS]
+bridge/ios_bridge.py [--udid UDID] [--port N] [--exit-on-stdin-eof] [--log-file PATH | --no-log] [--no-audio] [--no-motion-idr] [--max-bitrate KBPS]
 ```
 
 | event | fields | meaning |
@@ -15,8 +15,14 @@ bridge/ios_bridge.py [--udid UDID] [--port N] [--no-audio] [--no-motion-idr] [--
 | `ready` | `port`, `password`, `udid`, `ios` | HTTP server is up on `127.0.0.1:port` |
 | `error` | `code`, `message` | fatal; process exits with code 2 |
 
-Error codes: `driver_missing`, `device_not_found`, `multiple_devices`, `not_trusted`, `unsupported_ios`, `developer_mode_off`, `display_service_missing`, `unknown`. Client-side codes: `bridge_exited`, `timeout`, `stream_not_ready`, `stream_http`, `bad_frame`.
-`STRIKEMIRROR_BRIDGE_PASSWORD` may supply the password; otherwise a random one is generated. Stop the bridge with SIGTERM/terminate.
+Error codes: `driver_missing`, `device_not_found`, `multiple_devices`, `not_trusted`, `unsupported_ios`, `developer_mode_off`, `display_service_missing`, `port_in_use`, `unknown`. Client-side codes: `bridge_exited`, `timeout`, `stream_not_ready`, `stream_http`, `bad_frame`.
+`STRIKEMIRROR_BRIDGE_PASSWORD` may supply the password; otherwise a random one is generated. 
+**Lifecycle (verified by tests with a fake bridge; unplug/replug unverified on a device).**
+- `--exit-on-stdin-eof`: the client spawns the bridge with a stdin pipe and the bridge exits (status `stopped`, `reason: parent_gone`) when that pipe closes. This is how an orphaned bridge dies on every OS, including when the client crashes. A client stops the bridge by closing stdin first, then SIGTERM/terminate after about 1.5 s.
+- `BridgeSupervisor` (client) respawns a dead bridge with exponential backoff (`ReconnectPolicy`, resets after 10 s alive) and rebinds `BridgeHttp` to the new port and password. Events it reports: `bridge_down`, `restarted`, `restart_failed` (with `code`), `gave_up`.
+- Logs go to a rotating file (default `%LOCALAPPDATA%/StrikeMirror/logs/bridge.log`, 2 MB x 3 backups), never to stdout.
+- Touch coordinates are normalised over the frame buffer; after a rotation iOS re-renders the buffer upright, so no rotation transform is applied (derived from pymobiledevice3 `viewer.js`; **unverified on a device**).
+- Under fast motion the encoder can shrink the picture into the top-left of the buffer with flat gray padding; clients should detect and stretch it back (`client/frame_fix.py`).
 
 ## 2. HTTP (all endpoints)
 

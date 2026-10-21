@@ -111,6 +111,35 @@ def _die_with_parent() -> None:
     os._exit(0)
 
 
+def default_log_path():
+    """Per-user log location: %LOCALAPPDATA%/StrikeMirror/logs on Windows, XDG state dir elsewhere."""
+    from pathlib import Path
+
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "StrikeMirror"
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "strikemirror"
+    logs = base / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    return logs / "bridge.log"
+
+
+def setup_logging(path: str, max_bytes: int = 2_000_000, backups: int = 3):
+    """Send Python logging (including pymobiledevice3) to a size-limited rotating file.
+
+    stdout stays reserved for protocol events, so logs must never go there.
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    handler = RotatingFileHandler(path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    return handler
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -200,10 +229,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--udid")
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--exit-on-stdin-eof", action="store_true", help="exit when the parent closes stdin")
+    p.add_argument("--log-file", help="rotating log file (default: per-user log directory)")
+    p.add_argument("--no-log", action="store_true")
     p.add_argument("--no-audio", action="store_true")
     p.add_argument("--no-motion-idr", action="store_true")
     p.add_argument("--max-bitrate", type=int, default=60000, help="kbps cap advertised to the iPhone")
     args = p.parse_args(argv)
+    if not args.no_log:
+        try:
+            setup_logging(args.log_file or str(default_log_path()))
+        except OSError:
+            pass  # logging is best effort; never block mirroring
     if args.exit_on_stdin_eof:
         watch_stdin(sys.stdin, _die_with_parent)
     try:

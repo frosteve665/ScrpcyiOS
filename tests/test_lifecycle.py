@@ -118,3 +118,28 @@ def test_initial_start_error_propagates(mode):
     sup = c.BridgeSupervisor(proc(mode), c.BridgeHttp(1, "a"), on_event=lambda e: None)
     with pytest.raises(c.BridgeError):
         sup.start_initial(timeout=10)
+
+
+# ---- rotating log -------------------------------------------------------------------------
+def test_log_rotates_and_keeps_limited_backups(tmp_path):
+    import logging
+    path = tmp_path / "bridge.log"
+    handler = b.setup_logging(str(path), max_bytes=2000, backups=2)
+    try:
+        log = logging.getLogger("strikemirror.test")
+        for i in range(200):
+            log.warning("line %04d %s", i, "x" * 40)
+        handler.flush()
+    finally:
+        logging.getLogger().removeHandler(handler)
+        handler.close()
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert files == ["bridge.log", "bridge.log.1", "bridge.log.2"]   # never more than 2 backups
+    assert all(p.stat().st_size <= 2200 for p in tmp_path.iterdir())
+
+
+def test_default_log_path_is_per_user_and_creates_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    p = b.default_log_path()
+    assert p.parent.exists() and p.name == "bridge.log" and str(tmp_path) in str(p)
