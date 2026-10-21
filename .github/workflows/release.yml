@@ -1,0 +1,45 @@
+name: release
+# Push a tag like v0.2.0 (release) or v0.2.0-rc.1 (pre-release: any tag with a "-").
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the GitHub Release and upload the zip
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q -rfs tests
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r packaging/requirements-build.txt
+      - name: Build bridge.exe and player.exe (separate, license boundary)
+        run: python packaging/build.py
+      - name: Smoke-test the frozen builds without an iPhone
+        run: python tools/frozen_smoke.py dist
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/strikemirror-bridge, dist/strikemirror-player, README.md -DestinationPath "ScrpcyiOS-${{ github.ref_name }}-windows-x64.zip"
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flags=()
+          [[ "$TAG" == *-* ]] && flags+=(--prerelease)
+          gh release create "$TAG" "ScrpcyiOS-$TAG-windows-x64.zip" --title "ScrpcyiOS $TAG" --generate-notes \
+            --notes "Not yet verified on a real iPhone; see docs/DEVICE-MATRIX.md." "${flags[@]}" \
+          || gh release upload "$TAG" "ScrpcyiOS-$TAG-windows-x64.zip" --clobber
