@@ -64,3 +64,50 @@ def test_more_notches_means_longer_swipe_up_to_a_cap():
 
 def test_f9_toggles_recording():
     assert p.FUNCTION_ACTIONS["F9"] == "record"
+
+
+# ---- MOD shortcuts (scrcpy-style) ----------------------------------------------------
+import pytest  # noqa: E402
+
+from player_logic import FUNCTION_ACTIONS as FA  # noqa: E402
+from player_logic import MOD_MASK_WINDOWS, MOD_MASK_X11, mod_action, mod_pressed  # noqa: E402
+
+
+@pytest.mark.parametrize("key,shift,action", [
+    ("q", False, "quit"),
+    ("f", False, "fullscreen"),
+    ("Left", False, "rotate-left"),
+    ("Right", False, "rotate-right"),
+    ("r", False, "rotate-right"),
+    ("R", True, "restart"),
+    ("h", False, "home"),
+    ("p", False, "lock"),
+    ("Up", False, "volume-up"),
+    ("Down", False, "volume-down"),
+    ("g", False, "window-1to1"),
+    ("w", False, "window-fit"),
+    ("i", False, "fps"),
+    ("v", False, "paste"),
+])
+def test_mod_shortcuts(key, shift, action):
+    assert mod_action(key, shift) == action
+
+
+def test_unknown_mod_combo_is_consumed_not_forwarded():
+    assert mod_action("j", False) == "none"
+
+
+def test_shift_changes_meaning():
+    assert mod_action("r", False) != mod_action("R", True)
+
+
+def test_f11_toggles_fullscreen():
+    assert FA["F11"] == "fullscreen"
+
+
+def test_mod_mask_detection():
+    assert mod_pressed(MOD_MASK_WINDOWS, MOD_MASK_WINDOWS)
+    assert mod_pressed(0x20000 | 0x1, MOD_MASK_WINDOWS)       # Alt+Shift
+    assert not mod_pressed(0x4, MOD_MASK_WINDOWS)               # Ctrl alone
+    assert mod_pressed(MOD_MASK_X11, MOD_MASK_X11)
+    assert not mod_pressed(0, MOD_MASK_X11)

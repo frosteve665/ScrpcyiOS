@@ -2,7 +2,10 @@
 
 Mouse = finger (right click = Home). Keyboard goes to the iPhone as a hardware keyboard.
 Ctrl+A/C/V/X/Z -> Cmd+key (Ctrl+C/V also sync the clipboard). F1 Home, F2 Lock, F3 Vol-, F4 Vol+,
-F5 screenshot, F6/F7 rotate, F8 restart stream, F9 record on/off, mouse wheel = scroll.
+F5 screenshot, F6/F7 rotate, F8 restart stream, F9 record on/off, F11 fullscreen, mouse wheel = scroll.
+MOD (Alt) shortcuts like scrcpy: MOD+Q quit, MOD+F fullscreen, MOD+H home, MOD+P lock, MOD+Up/Down volume,
+MOD+Left/Right/R rotate, MOD+Shift+R restart stream, MOD+G 1:1 window, MOD+W fit window, MOD+I fps, MOD+V paste.
+Middle click = Home.
 Needs: Pillow (pip install pillow); tkinter ships with Python on Windows.
 """
 from __future__ import annotations
@@ -14,9 +17,15 @@ import time
 import tkinter as tk
 from pathlib import Path
 
+import numpy as np
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from frame_fix import DET_H, crop_box, detect_content_crop  # noqa: E402
 from ios_client import BridgeError, IOSDevice  # noqa: E402
-from player_logic import FUNCTION_ACTIONS, KeyState, fit_rect, scroll_swipe, window_to_norm  # noqa: E402
+from player_logic import (  # noqa: E402
+    FUNCTION_ACTIONS, MOD_MASK_WINDOWS, MOD_MASK_X11, KeyState, fit_rect, mod_action, mod_pressed, scroll_swipe,
+    window_to_norm,
+)
 
 try:
     from PIL import Image, ImageTk
@@ -25,8 +34,9 @@ except ImportError:  # pragma: no cover
 
 
 class Player:
-    def __init__(self, dev: IOSDevice, title: str):
+    def __init__(self, dev: IOSDevice, title: str, compensate: bool = True):
         self.dev = dev
+        self.compensate = compensate
         self.root = tk.Tk()
         self.root.title(title)
         self.root.geometry("390x844")
@@ -45,6 +55,10 @@ class Player:
         c.bind("<B1-Motion>", lambda e: self._touch("move", e))
         c.bind("<ButtonRelease-1>", lambda e: self._touch("up", e))
         c.bind("<ButtonPress-3>", lambda e: dev.input.button("home"))
+        c.bind("<ButtonPress-2>", lambda e: dev.input.button("home"))
+        self.mod_mask = MOD_MASK_WINDOWS if sys.platform == "win32" else MOD_MASK_X11
+        self.show_fps = True
+        self.frame_size = (0, 0)
         c.bind("<MouseWheel>", self._wheel)
         self.recording = False
         self.root.bind("<KeyPress>", self._key_down)
@@ -68,6 +82,11 @@ class Player:
         threading.Thread(target=self.dev.input.swipe, args=(x1, y1, x2, y2, 120, 6), daemon=True).start()
 
     def _key_down(self, e) -> None:
+        if mod_pressed(e.state, self.mod_mask):
+            act = mod_action(e.keysym, bool(e.state & 0x1))
+            if act != "none":
+                self._action(act)
+            return
         act = FUNCTION_ACTIONS.get(e.keysym)
         if act:
             return self._action(act)
@@ -104,6 +123,33 @@ class Player:
             self.dev.rotate(act.split("-")[1])
         elif act == "restart":
             self.dev.restart_stream()
+        elif act == "quit":
+            self.close()
+        elif act == "fullscreen":
+            self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen"))
+        elif act == "fps":
+            self.show_fps = not self.show_fps
+            if not self.show_fps:
+                self.root.title(self.title)
+        elif act in ("window-1to1", "window-fit"):
+            fw, fh = self.frame_size
+            if fw and fh:
+                if act == "window-1to1":
+                    self.root.geometry(f"{fw}x{fh}")
+                else:
+                    cw = max(self.canvas.winfo_width(), 1)
+                    self.root.geometry(f"{cw}x{round(cw * fh / fw)}")
+        elif act == "paste":
+            try:
+                self.dev.clipboard_set(self.root.clipboard_get())
+            except tk.TclError:
+                pass
+            report = self.keys.press("v", ctrl=True)
+            if report is not None:
+                self.dev.input.keys(report)
+            report = self.keys.release("v")
+            if report is not None:
+                self.dev.input.keys(report)
         elif act == "record":
             if self.recording:
                 self.dev.video.stop_recording()
@@ -120,15 +166,21 @@ class Player:
             self.last_frames = frames
             self.fps_n += 1
             w, h = max(self.canvas.winfo_width(), 1), max(self.canvas.winfo_height(), 1)
-            self.rect = fit_rect(w, h, f.width, f.height)
+            img = f.to_image()
+            if self.compensate:  # undo the encoder's "screen shrinks to a corner" during fast swipes
+                small = img.resize((max(8, round(DET_H * img.width / img.height)), DET_H), Image.NEAREST)
+                img = img.crop(crop_box(detect_content_crop(np.asarray(small)), img.width, img.height))
+            self.frame_size = (img.width, img.height)
+            self.rect = fit_rect(w, h, img.width, img.height)
             x, y, rw, rh = self.rect
-            img = f.to_image().resize((rw, rh), Image.BILINEAR)
+            img = img.resize((rw, rh), Image.BILINEAR)
             self.photo = ImageTk.PhotoImage(img)
             self.canvas.itemconfig(self.img_id, image=self.photo)
             self.canvas.coords(self.img_id, x, y)
         now = time.time()
         if now - self.fps_t >= 1:
-            self.root.title(f"{self.title}  {self.fps_n} fps")
+            if self.show_fps:
+                self.root.title(f"{self.title}  {self.fps_n} fps")
             self.fps_t, self.fps_n = now, 0
         self.root.after(4, self._tick)
 
@@ -143,6 +195,7 @@ class Player:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--udid")
+    ap.add_argument("--no-compensate", action="store_true", help="jangan regangkan layar yang menyusut saat swipe cepat")
     ap.add_argument("--no-audio", action="store_true", default=True)
     args = ap.parse_args()
     dev = IOSDevice(args.udid, on_status=lambda ev: print("·", ev.get("phase"), ev.get("note") or ""),
@@ -153,7 +206,7 @@ def main() -> int:
     except BridgeError as exc:
         print(f"[{exc.code}] {exc}")
         return 1
-    Player(dev, f"StrikeMirror iOS — {info.ios}").run()
+    Player(dev, f"StrikeMirror iOS — {info.ios}", compensate=not args.no_compensate).run()
     return 0
 
 

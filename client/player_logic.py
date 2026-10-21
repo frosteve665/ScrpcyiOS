@@ -20,7 +20,34 @@ _SHIFTED = {"exclam": 0x1E, "at": 0x1F, "numbersign": 0x20, "dollar": 0x21, "per
             "colon": 0x33, "quotedbl": 0x34, "asciitilde": 0x35, "less": 0x36, "greater": 0x37, "question": 0x38}
 
 FUNCTION_ACTIONS = {"F1": "home", "F2": "lock", "F3": "volume-down", "F4": "volume-up",
-                    "F5": "screenshot", "F6": "rotate-left", "F7": "rotate-right", "F8": "restart", "F9": "record"}
+                    "F5": "screenshot", "F6": "rotate-left", "F7": "rotate-right", "F8": "restart", "F9": "record",
+                    "F11": "fullscreen"}
+
+# ---- MOD shortcuts, modelled on scrcpy's doc/shortcuts.md (Android-only keys omitted: Back,
+# App switch, Menu, notification panels). Default MOD is Alt, like scrcpy's left Alt.
+MOD_MASK_WINDOWS = 0x20000   # Tk <state> bit for Alt on Windows
+MOD_MASK_X11 = 0x0008        # Mod1 (Alt) on X11
+
+_MOD_ACTIONS = {
+    "q": "quit", "f": "fullscreen",
+    "left": "rotate-left", "right": "rotate-right", "r": "rotate-right",
+    "h": "home", "p": "lock", "up": "volume-up", "down": "volume-down",
+    "g": "window-1to1", "w": "window-fit", "i": "fps", "v": "paste",
+}
+
+
+def mod_pressed(state: int, mask: int) -> bool:
+    return bool(state & mask)
+
+
+def mod_action(keysym: str, shift: bool) -> str:
+    """Action for MOD+key. Unlisted combos return "none": consumed, never typed into the iPhone."""
+    key = keysym.lower()
+    if shift and key == "r":
+        return "restart"
+    if shift:
+        return "none"
+    return _MOD_ACTIONS.get(key, "none")
 
 
 def keysym_to_usage(keysym: str):
