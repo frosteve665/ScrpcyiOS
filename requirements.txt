@@ -1,4 +1,4 @@
-pymobiledevice3>=11.28
+pymobiledevice3>=11.34.1
 av
 pillow
 numpy
