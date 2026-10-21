@@ -42,6 +42,7 @@ def build_player() -> None:
         "--name", "strikemirror-player", "--windowed" if sys.platform == "win32" else "--console",
         "--paths", str(ROOT / "client"),
         "--hidden-import", "recorder", "--hidden-import", "frame_fix",
+        "--hidden-import", "sounddevice",        # imported lazily by AudioSession; hook adds PortAudio
         "--exclude-module", "pymobiledevice3",   # license boundary: the client must not contain it
         str(ROOT / "client" / "player.py"),
     )

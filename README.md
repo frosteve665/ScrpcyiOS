@@ -15,11 +15,12 @@ docs/      PROTOCOL.md, SPRINTS.md, RESEARCH.md, DEVICE-MATRIX.md, superpowers/s
 ```
 pip install -r requirements.txt
 python client/player.py              # window: mouse = finger, right click = Home, F1..F9 shortcuts (F9 = record MP4, needs PyAV with libx265 + numpy)
+python client/player.py --help       # scrcpy-style options: --no-audio, --audio-buffer MS, --no-clipboard-autosync, --record FILE, -f
 python tools/smoke_test.py           # prints a JSON report, exit code 0 = pass
 ```
 
 ## Status (honest)
-- Verified by automated tests (no iPhone): framing, HEVC decode path, input queue, key mapping, error mapping, HID report layout (byte-identical to pymobiledevice3), recovery policy, auto-reconnect, MP4 recording (remux, no re-encode), scroll-wheel swipe, API contract.
+- Verified by automated tests (no iPhone): framing, HEVC decode path, input queue, key mapping, error mapping, HID report layout (byte-identical to pymobiledevice3), recovery policy, auto-reconnect, MP4 recording (remux, no re-encode), scroll-wheel swipe, API contract, audio playout buffer + `/audio.bin` client, two-way clipboard sync.
 - **Not verified on a real iPhone:** tunnel, video latency, touch/button/key delivery, audio, clipboard, rotation.
 - Touch is one finger. Second pointer is ignored until `bridge/multitouch_probe.py` proves more.
 - Plan: `docs/SPRINTS.md`. Design: `docs/superpowers/specs/2026-10-21-ios-engine-design.md` (draft, awaiting owner review).

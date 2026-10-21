@@ -5,12 +5,13 @@ Ctrl+A/C/V/X/Z -> Cmd+key (Ctrl+C/V also sync the clipboard). F1 Home, F2 Lock, 
 F5 screenshot, F6/F7 rotate, F8 restart stream, F9 record on/off, F11 fullscreen, mouse wheel = scroll.
 MOD (Alt) shortcuts like scrcpy: MOD+Q quit, MOD+F fullscreen, MOD+H home, MOD+P lock, MOD+Up/Down volume,
 MOD+Left/Right/R rotate, MOD+Shift+R restart stream, MOD+G 1:1 window, MOD+W fit window, MOD+I fps, MOD+V paste.
-Middle click = Home.
+Middle click = Home. Audio and two-way clipboard sync are on by default (--no-audio,
+--no-clipboard-autosync); see --help for the scrcpy-style options.
 Needs: Pillow (pip install pillow); tkinter ships with Python on Windows.
 """
 from __future__ import annotations
 
-import argparse
+import queue
 import sys
 import threading
 import time
@@ -23,9 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from frame_fix import DET_H, CropStabilizer, crop_box  # noqa: E402
 from ios_client import BridgeError, IOSDevice  # noqa: E402
 from player_logic import (  # noqa: E402
-    FUNCTION_ACTIONS, MOD_MASK_WINDOWS, MOD_MASK_X11, KeyState, fit_rect, is_mod_key, mod_action, mod_pressed,
-    scroll_swipe,
-    window_to_norm,
+    FUNCTION_ACTIONS, MOD_MASK_WINDOWS, MOD_MASK_X11, KeyState, bridge_args, fit_rect, is_mod_key, mod_action,
+    mod_pressed, parse_args, scroll_swipe, window_to_norm,
 )
 
 try:
@@ -35,8 +35,14 @@ except ImportError:  # pragma: no cover
 
 
 class Player:
-    def __init__(self, dev: IOSDevice, title: str, compensate: bool = True, crop_hold: float = 1.0):
+    HOST_CLIP_POLL_MS = 500
+
+    def __init__(self, dev: IOSDevice, title: str, compensate: bool = True, crop_hold: float = 1.0,
+                 clipboard_in: "queue.Queue[str] | None" = None, fullscreen: bool = False,
+                 record: str | None = None):
         self.dev = dev
+        self.clipboard_in = clipboard_in   # device copies, filled by ClipboardSync's thread
+        self._host_clip: str | None = None
         self.compensate = compensate
         self.crop = CropStabilizer(max_hold=crop_hold)
         self._first_frame = True
@@ -68,7 +74,20 @@ class Player:
         self.root.bind("<KeyRelease>", self._key_up)
         self.root.bind("<FocusOut>", lambda e: dev.input.keys(self.keys.clear()))
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        if fullscreen:
+            self.root.attributes("-fullscreen", True)
+        if record:
+            dev.video.start_recording(record)
+            self.recording = True
+            print("rekam: mulai ->", record)
+        self._audio_state = None
         self.root.after(5, self._tick)
+        if clipboard_in is not None:
+            try:   # what the PC held before mirroring started is not pushed (like the device side)
+                self._host_clip = self.root.clipboard_get()
+            except tk.TclError:
+                pass
+            self.root.after(self.HOST_CLIP_POLL_MS, self._watch_host_clipboard)
 
     def _touch(self, kind: str, e) -> None:
         n = window_to_norm(e.x, e.y, self.rect)
@@ -98,14 +117,14 @@ class Player:
         ctrl = bool(e.state & 0x4)
         if ctrl and e.keysym.lower() == "v":
             try:
-                self.dev.clipboard_set(self.root.clipboard_get())
+                self.dev.clipboard_push(self.root.clipboard_get())
             except tk.TclError:
                 pass
         report = self.keys.press(e.keysym, ctrl=ctrl)
         if report is not None:
             self.dev.input.keys(report)
-        if ctrl and e.keysym.lower() in ("c", "x"):
-            self.root.after(250, self._pull_clipboard)
+        if ctrl and e.keysym.lower() in ("c", "x") and self.clipboard_in is None:
+            self.root.after(250, self._pull_clipboard)   # without autosync: fetch the copy once
 
     def _key_up(self, e) -> None:
         if is_mod_key(e.keysym):
@@ -119,6 +138,41 @@ class Player:
         if text:
             self.root.clipboard_clear()
             self.root.clipboard_append(text)
+
+    def _apply_device_clipboard(self) -> None:
+        text = None
+        while True:
+            try:
+                text = self.clipboard_in.get_nowait()
+            except queue.Empty:
+                break
+        if text is not None:
+            self._host_clip = text   # remembered first, so the host watcher does not send it back
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+
+    def _watch_host_clipboard(self) -> None:
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:   # empty or non-text clipboard
+            text = None
+        if text is not None and text != self._host_clip:
+            self._host_clip = text
+            threading.Thread(target=self._push_quietly, args=(text,), daemon=True).start()
+        self.root.after(self.HOST_CLIP_POLL_MS, self._watch_host_clipboard)
+
+    def _push_quietly(self, text: str) -> None:
+        try:
+            self.dev.clipboard_push(text)
+        except OSError:
+            pass   # bridge down; the next change is sent after it is back
+
+    def _report_audio(self) -> None:
+        audio = getattr(self.dev, "audio", None)
+        if audio is not None and audio.state != self._audio_state:
+            self._audio_state = audio.state
+            if audio.state in ("unavailable", "no_output"):
+                print(f"audio: {audio.state} ({audio.last_error})")
 
     def _action(self, act: str) -> None:
         if act in ("home", "lock", "volume-down", "volume-up"):
@@ -146,7 +200,7 @@ class Player:
                     self.root.geometry(f"{cw}x{round(cw * fh / fw)}")
         elif act == "paste":
             try:
-                self.dev.clipboard_set(self.root.clipboard_get())
+                self.dev.clipboard_push(self.root.clipboard_get())
             except tk.TclError:
                 pass
             report = self.keys.press("v", ctrl=True)
@@ -166,6 +220,9 @@ class Player:
             self.recording = not self.recording
 
     def _tick(self) -> None:
+        if self.clipboard_in is not None:
+            self._apply_device_clipboard()
+        self._report_audio()
         frames, f = self.dev.video.wait_frame(self.last_frames, 0.0)
         if f is not None and frames != self.last_frames:
             self.last_frames = frames
@@ -201,23 +258,20 @@ class Player:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--udid")
-    ap.add_argument("--crop-hold", type=float, default=1.0,
-                    help="detik maksimum layar menyusut dianggap sementara (naikkan untuk aim-drag panjang)")
-    ap.add_argument("--no-compensate", action="store_true", help="jangan regangkan layar yang menyusut saat swipe cepat")
-    ap.add_argument("--no-audio", action="store_true", default=True)
-    args = ap.parse_args()
+    args = parse_args()
+    clip_in: "queue.Queue[str] | None" = queue.Queue() if args.clipboard_autosync else None
     dev = IOSDevice(args.udid, on_status=lambda ev: print("·", ev.get("phase"), ev.get("note") or ""),
-                    extra_args=["--no-audio"] if args.no_audio else [],
-                    on_event=lambda ev: print("!", ev.get("event"), ev.get("code") or ""))
+                    extra_args=bridge_args(args),
+                    on_event=lambda ev: print("!", ev.get("event"), ev.get("code") or ""),
+                    audio=args.audio, audio_buffer_ms=args.audio_buffer,
+                    on_device_clipboard=clip_in.put if clip_in is not None else None)
     try:
         info = dev.connect()
     except BridgeError as exc:
         print(f"[{exc.code}] {exc}")
         return 3  # distinct exit code: the frozen smoke test relies on it
-    Player(dev, f"StrikeMirror iOS — {info.ios}", compensate=not args.no_compensate,
-           crop_hold=args.crop_hold).run()
+    Player(dev, args.window_title or f"StrikeMirror iOS — {info.ios}", compensate=not args.no_compensate,
+           crop_hold=args.crop_hold, clipboard_in=clip_in, fullscreen=args.fullscreen, record=args.record).run()
     return 0
 
 

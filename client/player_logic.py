@@ -148,3 +148,35 @@ def scroll_swipe(x: float, y: float, delta: int, step: float = 0.12, max_len: fl
     cy = min(max(y, margin + half), 1 - margin - half)
     top, bottom = cy - half, cy + half
     return (x, bottom, x, top) if delta < 0 else (x, top, x, bottom)
+
+
+def _audio_buffer_ms(v: str) -> int:
+    import argparse
+    ms = int(v)
+    if not 1 <= ms <= 1000:
+        raise argparse.ArgumentTypeError("harus 1..1000 ms")
+    return ms
+
+
+def parse_args(argv=None):
+    """Player command line; option names follow scrcpy where an equivalent exists."""
+    import argparse
+    ap = argparse.ArgumentParser(prog="strikemirror-player")
+    ap.add_argument("--udid")
+    ap.add_argument("--no-audio", dest="audio", action="store_false", help="jangan teruskan audio iPhone")
+    ap.add_argument("--audio-buffer", type=_audio_buffer_ms, default=50, metavar="MS",
+                    help="buffer audio dalam ms (default 50, seperti scrcpy)")
+    ap.add_argument("--no-clipboard-autosync", dest="clipboard_autosync", action="store_false",
+                    help="matikan sinkronisasi clipboard otomatis dua arah")
+    ap.add_argument("--record", metavar="FILE.mp4", help="rekam sejak awal ke file mp4")
+    ap.add_argument("-f", "--fullscreen", action="store_true")
+    ap.add_argument("--window-title")
+    ap.add_argument("--crop-hold", type=float, default=1.0,
+                    help="detik maksimum layar menyusut dianggap sementara (naikkan untuk aim-drag panjang)")
+    ap.add_argument("--no-compensate", action="store_true", help="jangan regangkan layar yang menyusut saat swipe cepat")
+    return ap.parse_args(argv)
+
+
+def bridge_args(args) -> list[str]:
+    """Extra bridge flags implied by the player options."""
+    return [] if args.audio else ["--no-audio"]

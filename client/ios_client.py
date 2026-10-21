@@ -24,9 +24,10 @@ SUPPORTED_PROTOCOL = 1
 
 # --------------------------------------------------------------------------- bridge process
 class BridgeError(RuntimeError):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, status: Optional[int] = None):
         super().__init__(message)
         self.code = code
+        self.status = status  # HTTP status, when the error came from a response
 
 
 @dataclass
@@ -307,15 +308,15 @@ class BridgeHttp:
             time.sleep(delay)
         raise BridgeError("stream_not_ready", "Stream video belum siap.")
 
-    def open_stream(self) -> http.client.HTTPResponse:
+    def open_stream(self, path: str = "/stream.bin") -> http.client.HTTPResponse:
         port, auth, _ = self._target
         conn = http.client.HTTPConnection(self.host, port, timeout=30.0)
-        conn.request("GET", "/stream.bin", headers={"Authorization": auth})
+        conn.request("GET", path, headers={"Authorization": auth})
         resp = conn.getresponse()
         if resp.status != 200:
             body = resp.read()[:200]
             conn.close()
-            raise BridgeError("stream_http", f"/stream.bin -> {resp.status} {body!r}")
+            raise BridgeError("stream_http", f"{path} -> {resp.status} {body!r}", status=resp.status)
         resp._strikemirror_conn = conn  # keep alive for the response's lifetime
         return resp
 
@@ -413,6 +414,165 @@ class JitterBuffer:
     def buffered_ms(self) -> float:
         with self._lock:
             return len(self._buf) / self.BYTES_PER_MS
+
+
+def sounddevice_output(pull: Callable[[int], bytes]):
+    """Open the default sound card (PortAudio via sounddevice) and feed it from pull(nbytes).
+
+    Imported lazily: a missing package or PortAudio library raises here and the AudioSession
+    reports state "no_output" while video keeps running.
+    """
+    import sounddevice as sd
+
+    def callback(outdata, frames, _time, _status):
+        outdata[:] = pull(frames * 4)
+
+    stream = sd.RawOutputStream(samplerate=48000, channels=2, dtype="int16", blocksize=480,
+                                latency="low", callback=callback)
+    stream.start()
+    return stream
+
+
+class AudioSession:
+    """Plays GET /audio.bin (s16le 48 kHz stereo) through a JitterBuffer, like scrcpy's audio player.
+
+    state: idle, connecting, playing, unavailable (bridge answered 503, e.g. --no-audio or missing
+    decoder; not retried), no_output (no usable sound card; not retried), stopped.
+    output_factory(pull) returns an object with close(); it is opened once, on the first 200.
+    """
+
+    def __init__(self, http_api: BridgeHttp, buffer_ms: int = 50,
+                 output_factory: Optional[Callable[[Callable[[int], bytes]], object]] = None):
+        self.api = http_api
+        self.jitter = JitterBuffer(target_ms=buffer_ms, max_ms=buffer_ms * 2 + 100)
+        self.output_factory = output_factory or sounddevice_output
+        self.state = "idle"
+        self.last_error: Optional[str] = None
+        self._output = None
+        self._resp = None
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True, name="audio")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        resp = self._resp
+        if resp is not None:   # unblock a read waiting for the next packet
+            try:
+                resp._strikemirror_conn.sock.shutdown(2)
+            except (AttributeError, OSError):
+                pass
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(3)
+        out, self._output = self._output, None
+        if out is not None:
+            out.close()
+        self.state = "stopped"
+
+    def _run(self) -> None:
+        reconnect = ReconnectPolicy()
+        while not self._stop.is_set():
+            self.state = "connecting"
+            try:
+                resp = self.api.open_stream("/audio.bin")
+            except BridgeError as exc:
+                self.last_error = str(exc)
+                if exc.status == 503:
+                    self.state = "unavailable"
+                    return
+            except (OSError, http.client.HTTPException) as exc:
+                self.last_error = str(exc)
+            else:
+                self._resp = resp
+                try:
+                    if self._output is None:
+                        try:
+                            self._output = self.output_factory(self.jitter.pull)
+                        except Exception as exc:  # no sound card / no PortAudio: audio off, video on
+                            self.last_error = f"audio output: {exc}"
+                            self.state = "no_output"
+                            return
+                    self.state = "playing"
+                    reconnect.on_success()
+                    for pcm in iter_audio(resp.read1 if hasattr(resp, "read1") else resp.read):
+                        if self._stop.is_set():
+                            return
+                        self.jitter.push(pcm)
+                except (OSError, ValueError, http.client.HTTPException, BridgeError) as exc:
+                    self.last_error = str(exc)
+                finally:
+                    self._resp = None
+                    resp._strikemirror_conn.close()
+            if self._stop.wait(reconnect.next_delay()):
+                return
+
+
+class ClipboardSync:
+    """Two-way clipboard sync (scrcpy's default behaviour).
+
+    Device -> host: long-polls GET /clipboard/events?since=seq and calls on_device_text(text)
+    for each copy made on the iPhone after sync started. Host -> device: push_host_text(text).
+    The last text seen on either side is remembered, so neither direction echoes the other.
+    """
+
+    def __init__(self, http_api: BridgeHttp, on_device_text: Callable[[str], None], poll_timeout: float = 35.0):
+        self.api = http_api
+        self.on_device_text = on_device_text
+        self.poll_timeout = poll_timeout   # the bridge answers after at most 25 s
+        self._last: Optional[str] = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True, name="clipboard")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(2)
+
+    def push_host_text(self, text: str) -> bool:
+        """Send a host clipboard change to the device; False if it is the text we already synced."""
+        with self._lock:
+            if text == self._last:
+                return False
+            self._last = text
+        status, _ = self.api.request("POST", "/clipboard", {"text": text})
+        return status == 200
+
+    def _run(self) -> None:
+        backoff = ReconnectPolicy(base=1.0, cap=30.0)
+        since: Optional[int] = None
+        while not self._stop.is_set():
+            path = "/clipboard/events" if since is None else f"/clipboard/events?since={since}"
+            try:
+                status, payload = self.api.request("GET", path, timeout=self.poll_timeout)
+                if status != 200:
+                    raise BridgeError("clipboard_http", f"{path} -> {status}", status=status)
+                ev = json.loads(payload)
+            except (OSError, ValueError, http.client.HTTPException, BridgeError):
+                since = None   # a respawned bridge numbers copies from scratch
+                if self._stop.wait(backoff.next_delay()):
+                    return
+                continue
+            if self._stop.is_set():   # a long-poll can outlive stop(); never call back after it
+                return
+            backoff.on_success()
+            text = ev.get("text")
+            if since is not None and isinstance(text, str):
+                with self._lock:
+                    fresh = text != self._last
+                    self._last = text
+                if fresh:
+                    self.on_device_text(text)
+            since = ev.get("seq", since)
 
 
 # --------------------------------------------------------------------------- decoding
@@ -689,9 +849,17 @@ class IOSDevice:
     """High level: start bridge, video, input, clipboard, rotate, screenshot."""
 
     def __init__(self, udid: Optional[str] = None, on_status: Optional[Callable[[dict], None]] = None,
-                 extra_args: Optional[list[str]] = None, on_event: Optional[Callable[[dict], None]] = None):
+                 extra_args: Optional[list[str]] = None, on_event: Optional[Callable[[dict], None]] = None,
+                 audio: bool = False, audio_buffer_ms: int = 50, audio_output=None,
+                 on_device_clipboard: Optional[Callable[[str], None]] = None):
+        """audio: play /audio.bin (the bridge must run without --no-audio).
+        on_device_clipboard: enables two-way clipboard sync; called from a worker thread."""
         self.bridge = BridgeProcess(udid, on_status=on_status, extra_args=extra_args)
         self.on_event = on_event
+        self.audio_enabled, self.audio_buffer_ms, self.audio_output = audio, audio_buffer_ms, audio_output
+        self.on_device_clipboard = on_device_clipboard
+        self.audio: Optional[AudioSession] = None
+        self.clipboard: Optional[ClipboardSync] = None
         self.link_state = "ok"   # ok | reconnecting | gave_up (read by the UI)
         self.supervisor: Optional[BridgeSupervisor] = None
         self.api: Optional[BridgeHttp] = None
@@ -705,7 +873,16 @@ class IOSDevice:
         self.video = VideoSession(self.api)
         self.input = InputController(self.api)
         self.video.start()
+        self._start_media()
         return info
+
+    def _start_media(self) -> None:
+        if self.audio_enabled:
+            self.audio = AudioSession(self.api, self.audio_buffer_ms, self.audio_output)
+            self.audio.start()
+        if self.on_device_clipboard is not None:
+            self.clipboard = ClipboardSync(self.api, self.on_device_clipboard)
+            self.clipboard.start()
 
     def _on_supervisor_event(self, ev: dict) -> None:
         kind = ev.get("event")
@@ -728,6 +905,12 @@ class IOSDevice:
         status, _ = self.api.request("POST", "/clipboard", {"text": text})
         return status == 200
 
+    def clipboard_push(self, text: str) -> bool:
+        """Host clipboard -> device; with sync on, unchanged text is not resent (returns False)."""
+        if self.clipboard is not None:
+            return self.clipboard.push_host_text(text)
+        return self.clipboard_set(text)
+
     def rotate(self, direction: str = "right") -> dict:
         status, payload = self.api.request("POST", "/rotate", {"direction": direction}, timeout=20.0)
         return json.loads(payload) if status == 200 else {}
@@ -747,6 +930,9 @@ class IOSDevice:
             self.input.close()
         if self.video:
             self.video.stop()
+        for part in (getattr(self, "audio", None), getattr(self, "clipboard", None)):
+            if part is not None:
+                part.stop()
         if self.supervisor:
             self.supervisor.stop()
         else:

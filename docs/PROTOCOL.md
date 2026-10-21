@@ -59,11 +59,17 @@ Coordinates are `0..65535` across the device screen (`x` left to right, `y` top 
 
 ## 5. Clipboard
 
-`GET /clipboard` -> `{"text":str|null,"image":{...}|null}`; `POST /clipboard` `{"text":str}` -> `{"ok":true}`; `GET|POST /clipboard/image` (PNG); `GET /clipboard/events` long-poll for device-side copies. **verified (code)**, **unverified (device)**.
+`GET /clipboard` -> `{"text":str|null,"image":{...}|null}`; `POST /clipboard` `{"text":str}` -> `{"ok":true}`; `GET|POST /clipboard/image` (PNG). **verified (code)**, **unverified (device)**.
+
+`GET /clipboard/events[?since=SEQ]` long-polls up to 25 s and returns `{"seq":int,"text":str|null,"image":{...}|null}`. Without `since` (first poll) it answers at once with the current `seq` and `text: null`: what the device held before sync started is never reported. With `since` equal to the current `seq` it waits for a device-side copy; `text` is non-null only when `seq` changed. **verified (source)**, **unverified (device)**.
+
+Client (`ClipboardSync`, on by default in the player, `--no-clipboard-autosync` turns it off): device copies go to the PC clipboard; PC clipboard changes (polled every 500 ms) are POSTed. The last synced text is remembered on both sides, so neither direction echoes. Text only; images are not synced yet.
 
 ## 6. Audio
 
-`GET /audio.bin` -> chunked audio chunks; `503` if the optional audio dependencies are missing. The chunk format (PCM per source comments) and sync with video are **unverified**; to be pinned down in Sprint 4. Disabled by default with `--no-audio`.
+`GET /audio.bin` -> chunked body of messages `[u32 BE len][len bytes of s16le 48 kHz stereo PCM]` (one decoded 10 ms AAC-ELD packet per message, ~192 KB/s). **verified (pymobiledevice3 11.40.2 source `screen_stream.py` + `viewer.js`; device untested)**. `503` when audio is unavailable (bridge started with `--no-audio`, or decoder dependencies missing): clients must not retry. `500` if the device audio session fails to start. A slow subscriber loses the oldest packets (server queue of 64). The bridge keeps the device audio session alive after the last subscriber leaves, so reconnecting is cheap.
+
+Client (`AudioSession`): pre-buffers `--audio-buffer` ms (default 50, like scrcpy) in a `JitterBuffer`, plays silence on underrun and re-buffers, drops the oldest audio past `2 x buffer + 100` ms. States: `connecting`, `playing`, `unavailable` (503), `no_output` (no sound card / PortAudio), `stopped`. Audio/video sync and drift: **unverified**.
 
 ## 7. Versioning
 

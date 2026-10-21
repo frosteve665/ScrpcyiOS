@@ -41,3 +41,24 @@ def test_client_does_not_import_pymobiledevice3():
         names = [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
         names += [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
         assert not any(x.startswith("pymobiledevice3") for x in names), f"{f.name} imports pymobiledevice3"
+
+
+def _frozen_smoke():
+    import importlib.util
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parent.parent / "tools" / "frozen_smoke.py"
+    spec = importlib.util.spec_from_file_location("frozen_smoke", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_frozen_smoke_requires_portaudio_in_the_windows_player(tmp_path):
+    fs = _frozen_smoke()
+    (tmp_path / "strikemirror-player").mkdir()
+    assert fs.check_audio_runtime(tmp_path, platform="win32")          # missing DLL is a failure
+    dll = tmp_path / "strikemirror-player" / "_internal" / "_sounddevice_data" / "portaudio-binaries"
+    dll.mkdir(parents=True)
+    (dll / "libportaudio64bit.dll").write_bytes(b"")
+    assert fs.check_audio_runtime(tmp_path, platform="win32") == []
+    assert fs.check_audio_runtime(tmp_path / "nothing", platform="linux") == []   # system PortAudio elsewhere

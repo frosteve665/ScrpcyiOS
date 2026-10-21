@@ -6,7 +6,8 @@ Passes when:
   1. the frozen bridge starts, imports pymobiledevice3, and reports a clean JSON error event
      (no device / no Apple driver on a CI runner) with exit code 2;
   2. the frozen player starts, finds the sibling bridge, gets that error, and exits with code 3;
-  3. the player bundle does not contain pymobiledevice3 (license boundary).
+  3. the player bundle does not contain pymobiledevice3 (license boundary);
+  4. on Windows the player bundle carries the PortAudio DLL that sounddevice loads for audio.
 """
 from __future__ import annotations
 
@@ -55,9 +56,16 @@ def check_boundary(dist: Path) -> list[str]:
     return [f"player bundle contains pymobiledevice3: {hits[:3]}"] if hits else []
 
 
+def check_audio_runtime(dist: Path, platform: str = sys.platform) -> list[str]:
+    if platform != "win32":   # Linux/macOS builds use the system PortAudio
+        return []
+    hits = list((dist / "strikemirror-player").rglob("libportaudio64bit*.dll"))
+    return [] if hits else ["player bundle has no PortAudio DLL (sounddevice not collected): audio would be off"]
+
+
 def main() -> int:
     dist = Path(sys.argv[1] if len(sys.argv) > 1 else "dist")
-    errs = check_bridge(dist) + check_boundary(dist)
+    errs = check_bridge(dist) + check_boundary(dist) + check_audio_runtime(dist)
     if "--skip-player" not in sys.argv:
         errs += check_player(dist)
     for e in errs:

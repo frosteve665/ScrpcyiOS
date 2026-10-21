@@ -53,6 +53,7 @@ gantt
 ## S4: Paritas scrcpy A
 - Audio diputar di PC; rekam `--record` (remux HEVC ke mp4 tanpa re-encode); clipboard otomatis dua arah; `--video-buffer`; screenshot; opsi CLI.
 - **Keluar jika:** rekam 5 menit menghasilkan mp4 yang bisa diputar; audio tidak drift lebih dari 200 ms.
+- Status 2026-10-21 (teruji otomatis, **belum di iPhone**): `AudioSession` (sounddevice/PortAudio), `--no-audio`, `--audio-buffer`, `ClipboardSync` dua arah + `--no-clipboard-autosync`, `--record`, `-f/--fullscreen`, `--window-title`. Belum: `--video-buffer`, sinkron clipboard gambar, ukuran drift audio.
 
 ## S5: Wi-Fi dan paket
 - Wi-Fi lewat RemotePairing (rujukan: Pane); bridge menjadi `.exe` (PyInstaller); wizard pertama kali; pin versi pymobiledevice3 + canary.

@@ -1,5 +1,6 @@
 pymobiledevice3>=11.28
 av
 pillow
+sounddevice
 numpy
 pytest
