@@ -2,20 +2,21 @@
 
 Mouse = finger (right click = Home). Keyboard goes to the iPhone as a hardware keyboard.
 Ctrl+A/C/V/X/Z -> Cmd+key (Ctrl+C/V also sync the clipboard). F1 Home, F2 Lock, F3 Vol-, F4 Vol+,
-F5 screenshot, F6/F7 rotate, F8 restart stream.
+F5 screenshot, F6/F7 rotate, F8 restart stream, F9 record on/off, mouse wheel = scroll.
 Needs: Pillow (pip install pillow); tkinter ships with Python on Windows.
 """
 from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ios_client import BridgeError, IOSDevice  # noqa: E402
-from player_logic import FUNCTION_ACTIONS, KeyState, fit_rect, window_to_norm  # noqa: E402
+from player_logic import FUNCTION_ACTIONS, KeyState, fit_rect, scroll_swipe, window_to_norm  # noqa: E402
 
 try:
     from PIL import Image, ImageTk
@@ -44,6 +45,8 @@ class Player:
         c.bind("<B1-Motion>", lambda e: self._touch("move", e))
         c.bind("<ButtonRelease-1>", lambda e: self._touch("up", e))
         c.bind("<ButtonPress-3>", lambda e: dev.input.button("home"))
+        c.bind("<MouseWheel>", self._wheel)
+        self.recording = False
         self.root.bind("<KeyPress>", self._key_down)
         self.root.bind("<KeyRelease>", self._key_up)
         self.root.bind("<FocusOut>", lambda e: dev.input.keys(self.keys.clear()))
@@ -56,6 +59,13 @@ class Player:
             return
         inp = self.dev.input
         {"down": inp.down, "move": inp.move, "up": inp.up}[kind](0, *n)
+
+    def _wheel(self, e) -> None:
+        n = window_to_norm(e.x, e.y, self.rect)
+        if n is None:
+            return
+        x1, y1, x2, y2 = scroll_swipe(n[0], n[1], e.delta)
+        threading.Thread(target=self.dev.input.swipe, args=(x1, y1, x2, y2, 120, 6), daemon=True).start()
 
     def _key_down(self, e) -> None:
         act = FUNCTION_ACTIONS.get(e.keysym)
@@ -94,6 +104,15 @@ class Player:
             self.dev.rotate(act.split("-")[1])
         elif act == "restart":
             self.dev.restart_stream()
+        elif act == "record":
+            if self.recording:
+                self.dev.video.stop_recording()
+                print("rekam: selesai")
+            else:
+                path = f"ios_{int(time.time())}.mp4"
+                self.dev.video.start_recording(path)
+                print("rekam: mulai ->", path)
+            self.recording = not self.recording
 
     def _tick(self) -> None:
         frames, f = self.dev.video.wait_frame(self.last_frames, 0.0)

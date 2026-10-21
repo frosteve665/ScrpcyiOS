@@ -20,7 +20,7 @@ _SHIFTED = {"exclam": 0x1E, "at": 0x1F, "numbersign": 0x20, "dollar": 0x21, "per
             "colon": 0x33, "quotedbl": 0x34, "asciitilde": 0x35, "less": 0x36, "greater": 0x37, "question": 0x38}
 
 FUNCTION_ACTIONS = {"F1": "home", "F2": "lock", "F3": "volume-down", "F4": "volume-up",
-                    "F5": "screenshot", "F6": "rotate-left", "F7": "rotate-right", "F8": "restart"}
+                    "F5": "screenshot", "F6": "rotate-left", "F7": "rotate-right", "F8": "restart", "F9": "record"}
 
 
 def keysym_to_usage(keysym: str):
@@ -97,3 +97,16 @@ class KeyState:
         self.held.clear()
         self.cmd = False
         return []
+
+
+def scroll_swipe(x: float, y: float, delta: int, step: float = 0.12, max_len: float = 0.6, margin: float = 0.02):
+    """Mouse wheel -> a vertical finger swipe (normalized). Wheel down moves the finger up (content scrolls down).
+
+    `delta` is notches (small ints) or Windows Tk units (multiples of 120). Returns (x1, y1, x2, y2).
+    """
+    notches = max(1, round(abs(delta) / 120)) if abs(delta) >= 120 else max(1, abs(int(delta)))
+    length = min(step * notches, max_len)
+    half = length / 2
+    cy = min(max(y, margin + half), 1 - margin - half)
+    top, bottom = cy - half, cy + half
+    return (x, bottom, x, top) if delta < 0 else (x, top, x, bottom)

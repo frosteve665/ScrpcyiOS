@@ -23,6 +23,7 @@ import socket
 import sys
 
 DISPLAY_SERVICE = "com.apple.coredevice.displayservice"
+PROTOCOL_VERSION = 1
 
 MESSAGES = {
     "driver_missing": "Apple Mobile Device Service tidak jalan. Pasang 'Apple Devices' dari Microsoft Store, lalu colok ulang iPhone.",
@@ -33,6 +34,10 @@ MESSAGES = {
     "multiple_devices": "Ada lebih dari satu iPhone. Pilih salah satu dengan --udid.",
     "display_service_missing": "iPhone belum menawarkan layanan layar. Cabut dan colok lagi, lalu coba lagi.",
 }
+
+
+def ready_event(port: int, password: str, udid: str, ios: str) -> dict:
+    return {"port": port, "password": password, "udid": udid, "ios": ios, "protocol": PROTOCOL_VERSION}
 
 
 def emit(event: str, **fields) -> None:
@@ -158,7 +163,7 @@ async def run(args) -> None:
                             raise
 
                 server._eager_stream_start = video_only
-            emit("ready", port=port, password=password, udid=udid, ios=ios)
+            emit("ready", **ready_event(port, password, udid, ios))
             await server.serve()
             return
 

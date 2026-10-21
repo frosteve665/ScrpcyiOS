@@ -18,6 +18,7 @@ from typing import Callable, Iterator, Optional
 
 FRAME_KEY, FRAME_DELTA, FRAME_KEY_RESET = 0, 1, 2
 TOUCH_MAX = 65535
+SUPPORTED_PROTOCOL = 1
 
 
 # --------------------------------------------------------------------------- bridge process
@@ -75,6 +76,10 @@ class BridgeProcess:
             if kind == "status" and self.on_status:
                 self.on_status(ev)
             elif kind == "ready":
+                if ev.get("protocol", 1) > SUPPORTED_PROTOCOL:
+                    self.stop()
+                    raise BridgeError("protocol_mismatch",
+                                      f"Bridge protocol {ev['protocol']} lebih baru dari klien ({SUPPORTED_PROTOCOL}). Perbarui klien.")
                 self.info = BridgeInfo(ev["port"], ev["password"], ev.get("udid", ""), ev.get("ios", ""))
                 return self.info
             elif kind == "error":
@@ -237,6 +242,24 @@ class RecoveryPolicy:
         self._plis = 0
 
 
+class ReconnectPolicy:
+    """Exponential backoff for reconnecting: base, 2x base, ... capped. max_attempts=None means forever."""
+
+    def __init__(self, base: float = 0.5, cap: float = 5.0, max_attempts: Optional[int] = None):
+        self.base, self.cap, self.max_attempts = base, cap, max_attempts
+        self._attempts = 0
+
+    def next_delay(self) -> Optional[float]:
+        if self.max_attempts is not None and self._attempts >= self.max_attempts:
+            return None
+        delay = min(self.base * (2 ** self._attempts), self.cap)
+        self._attempts += 1
+        return delay
+
+    def on_success(self) -> None:
+        self._attempts = 0
+
+
 class VideoSession:
     """Pulls /stream.bin, decodes, and keeps the newest frame (drops stale ones)."""
 
@@ -246,6 +269,9 @@ class VideoSession:
         self.frames = 0
         self.last_error: Optional[str] = None
         self.policy = RecoveryPolicy()
+        self._rec_path: Optional[str] = None
+        self._rec = None
+        self._hvcc = b""
         self._good = 0
         self._stop = threading.Event()
         self._cond = threading.Condition()
@@ -255,8 +281,18 @@ class VideoSession:
         self._thread = threading.Thread(target=self._run, daemon=True, name="video")
         self._thread.start()
 
+    def start_recording(self, path: str) -> None:
+        """Remux the live stream to mp4 (no re-encode). Starts at the next keyframe."""
+        self._rec_path = path
+
+    def stop_recording(self) -> None:
+        rec, self._rec, self._rec_path = self._rec, None, None
+        if rec is not None:
+            rec.close()
+
     def stop(self) -> None:
         self._stop.set()
+        self.stop_recording()
 
     def wait_frame(self, last: int, timeout: float = 1.0):
         with self._cond:
@@ -264,14 +300,29 @@ class VideoSession:
                 self._cond.wait(timeout)
             return self.frames, self.latest
 
+    def _record(self, kind: int, data: bytes, frame) -> None:
+        if self._rec_path is None:
+            return
+        try:
+            if self._rec is None:
+                if kind == FRAME_DELTA:
+                    return
+                from recorder import Mp4Recorder
+                self._rec = Mp4Recorder(self._rec_path, self._hvcc, frame.width, frame.height)
+            self._rec.write(kind, data, time.monotonic())
+        except Exception as exc:  # recording must never break mirroring
+            self.last_error = f"recording stopped: {exc}"
+            self._rec_path = None
+
     def _run(self) -> None:
-        backoff = 0.5
+        reconnect = ReconnectPolicy()
         while not self._stop.is_set():
             try:
                 _, hvcc = self.api.codec()
+                self._hvcc = hvcc
                 dec = HevcDecoder(hvcc)
                 resp = self.api.open_stream()
-                backoff = 0.5
+                reconnect.on_success()
                 need_key = True
                 for kind, data in iter_frames(resp.read1 if hasattr(resp, "read1") else resp.read):
                     if self._stop.is_set():
@@ -292,6 +343,7 @@ class VideoSession:
                             if self._good >= 30:
                                 self.policy.on_healthy()
                                 self._good = 0
+                            self._record(kind, data, f)
                     except Exception as exc:  # decoder error: rate-limited recovery
                         self.last_error = str(exc)
                         self._good = 0
@@ -305,9 +357,8 @@ class VideoSession:
                                 pass
             except (OSError, http.client.HTTPException, BridgeError) as exc:
                 self.last_error = str(exc)
-            if self._stop.wait(backoff):
+            if self._stop.wait(reconnect.next_delay()):
                 return
-            backoff = min(backoff * 2, 5.0)
 
 
 # --------------------------------------------------------------------------- input

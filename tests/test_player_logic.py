@@ -38,3 +38,29 @@ def test_shifted_symbol_includes_shift():
 
 def test_clear_releases_everything():
     k = p.KeyState(); k.press("a"); assert k.clear() == [] and k.report() == []
+
+
+def test_wheel_down_swipes_finger_up_and_stays_in_bounds():
+    x1, y1, x2, y2 = p.scroll_swipe(0.5, 0.5, -1)
+    assert x1 == x2 == 0.5 and y2 < y1
+    for pos in (0.0, 0.5, 1.0):
+        for delta in (-3, -1, 1, 3):
+            pts = p.scroll_swipe(0.5, pos, delta)
+            assert all(0.0 <= v <= 1.0 for v in pts)
+            assert abs(pts[3] - pts[1]) > 0.05          # never degenerates to a tap
+
+
+def test_wheel_up_swipes_finger_down():
+    _, y1, _, y2 = p.scroll_swipe(0.5, 0.5, 1)
+    assert y2 > y1
+
+
+def test_more_notches_means_longer_swipe_up_to_a_cap():
+    short = abs(p.scroll_swipe(0.5, 0.5, -1)[3] - p.scroll_swipe(0.5, 0.5, -1)[1])
+    long_ = abs(p.scroll_swipe(0.5, 0.5, -3)[3] - p.scroll_swipe(0.5, 0.5, -3)[1])
+    huge = abs(p.scroll_swipe(0.5, 0.5, -50)[3] - p.scroll_swipe(0.5, 0.5, -50)[1])
+    assert short < long_ <= huge <= 0.7
+
+
+def test_f9_toggles_recording():
+    assert p.FUNCTION_ACTIONS["F9"] == "record"

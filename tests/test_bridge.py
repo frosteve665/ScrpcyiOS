@@ -27,3 +27,8 @@ def test_classify_known_errors():
 
 def test_free_port():
     assert 0 < b.free_port() < 65536
+
+
+def test_ready_event_announces_protocol_version():
+    ev = b.ready_event(5555, "pw", "UDID", "17.5")
+    assert ev == {"port": 5555, "password": "pw", "udid": "UDID", "ios": "17.5", "protocol": 1}

@@ -61,4 +61,4 @@ Coordinates are `0..65535` across the device screen (`x` left to right, `y` top 
 
 ## 7. Versioning
 
-This is v1. New fields may be added; clients must ignore unknown fields. Breaking changes bump the major version and are announced in `status` / `ready` (field `protocol`, planned for Sprint 2).
+This is v1. New fields may be added; clients must ignore unknown fields. Breaking changes bump the major version and are announced in `status` / `ready` (field `protocol`, implemented; the client refuses a bridge with a newer major version).
