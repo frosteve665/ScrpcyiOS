@@ -43,7 +43,11 @@ def ready_event(port: int, password: str, udid: str, ios: str) -> dict:
 
 
 def emit(event: str, **fields) -> None:
-    print(json.dumps({"event": event, **fields}, ensure_ascii=False), flush=True)
+    """One JSON event per line on stdout. Never raises: the reader may already be gone."""
+    try:
+        print(json.dumps({"event": event, **fields}, ensure_ascii=False), flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 class BridgeError(Exception):
@@ -106,9 +110,30 @@ def watch_stdin(stream, on_eof) -> threading.Thread:
     return t
 
 
-def _die_with_parent() -> None:
-    emit("status", phase="stopped", reason="parent_gone")
-    os._exit(0)
+def parent_gone(loop, task, grace: float = 3.0) -> None:
+    """The client closed our stdin (it exited or crashed): shut down.
+
+    With a running asyncio task, cancel it so the tunnel/HID/display cleanup in finally blocks runs;
+    os._exit is only the fallback if that takes longer than `grace`. Without a task, exit at once.
+    """
+    try:
+        emit("status", phase="stopped", reason="parent_gone")
+    finally:
+        if loop is None or task is None:
+            os._exit(0)
+        timer = threading.Timer(grace, os._exit, args=(0,))
+        timer.daemon = True
+        timer.start()
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:  # loop already closed
+            os._exit(0)
+
+
+def install_parent_watch(stream, grace: float = 3.0) -> threading.Thread:
+    """Call from inside the running asyncio task that should be cancelled on parent exit."""
+    loop, task = asyncio.get_running_loop(), asyncio.current_task()
+    return watch_stdin(stream, lambda: parent_gone(loop, task, grace))
 
 
 def default_log_path():
@@ -178,6 +203,8 @@ async def preflight(udid: str) -> str:
 
 
 async def run(args) -> None:
+    if args.exit_on_stdin_eof:
+        install_parent_watch(sys.stdin)
     from pymobiledevice3.remote.core_device.display_service import is_media_in_use_error
     from pymobiledevice3.remote.core_device.screen_stream import ScreenStreamServer
     from pymobiledevice3.remote.rsd_tunnel import PreferredRsdTunnel
@@ -240,11 +267,9 @@ def main(argv: list[str] | None = None) -> int:
             setup_logging(args.log_file or str(default_log_path()))
         except OSError:
             pass  # logging is best effort; never block mirroring
-    if args.exit_on_stdin_eof:
-        watch_stdin(sys.stdin, _die_with_parent)
     try:
         asyncio.run(run(args))
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         return 0
     except BaseException as exc:  # noqa: BLE001 - report everything as a protocol event
         err = classify(exc)

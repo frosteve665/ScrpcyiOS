@@ -11,8 +11,15 @@ _NAMED = {
     "semicolon": 0x33, "apostrophe": 0x34, "grave": 0x35, "comma": 0x36, "period": 0x37, "slash": 0x38,
     "Delete": 0x4C, "Home": 0x4A, "End": 0x4D, "Prior": 0x4B, "Next": 0x4E,
     "Right": 0x4F, "Left": 0x50, "Down": 0x51, "Up": 0x52,
-    "Shift_L": SHIFT, "Shift_R": 0xE5, "Alt_L": 0xE2, "Alt_R": 0xE6,
+    "Shift_L": SHIFT, "Shift_R": 0xE5,
+    # Alt_L/Alt_R are deliberately absent: Alt is the MOD key and must never reach the iPhone
+    # (MOD+V would otherwise arrive as Option+Cmd+V, "Paste and Match Style").
 }
+MOD_KEYS = frozenset({"Alt_L", "Alt_R"})
+
+
+def is_mod_key(keysym: str) -> bool:
+    return keysym in MOD_KEYS
 # shifted symbols reported by Tk as their own keysym -> (base key usage)
 _SHIFTED = {"exclam": 0x1E, "at": 0x1F, "numbersign": 0x20, "dollar": 0x21, "percent": 0x22,
             "asciicircum": 0x23, "ampersand": 0x24, "asterisk": 0x25, "parenleft": 0x26, "parenright": 0x27,
@@ -36,8 +43,12 @@ _MOD_ACTIONS = {
 }
 
 
+CTRL_MASK = 0x0004
+
+
 def mod_pressed(state: int, mask: int) -> bool:
-    return bool(state & mask)
+    """MOD held. Ctrl+Alt is AltGr on Windows (it types characters), so it is not MOD."""
+    return bool(state & mask) and not state & CTRL_MASK
 
 
 def mod_action(keysym: str, shift: bool) -> str:

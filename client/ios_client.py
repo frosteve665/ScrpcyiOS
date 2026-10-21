@@ -51,10 +51,28 @@ class BridgeProcess:
         self.on_status = on_status
         self.proc: Optional[subprocess.Popen] = None
         self.info: Optional[BridgeInfo] = None
+        self._lock = threading.Lock()
+        self._closed = False
 
     def start(self, timeout: float = 120.0) -> BridgeInfo:
-        self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        with self._lock:
+            if self._closed:
+                raise BridgeError("closed", "Bridge sudah ditutup.")
+            self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        try:
+            info = self._await_ready(timeout)
+        except BridgeError:
+            if self._closed:
+                raise BridgeError("closed", "Bridge ditutup saat sedang dimulai.") from None
+            raise
+        with self._lock:
+            if not self._closed:
+                return info
+        self.stop()
+        raise BridgeError("closed", "Bridge ditutup saat sedang dimulai.")
+
+    def _await_ready(self, timeout: float) -> BridgeInfo:
         deadline = time.monotonic() + timeout
         result: "queue.Queue[dict]" = queue.Queue()
 
@@ -87,6 +105,7 @@ class BridgeProcess:
                 self.stop()
                 raise BridgeError(ev.get("code", "unknown"), ev.get("message", ""))
             elif kind == "eof":
+                self.stop()  # reap the exited process
                 raise BridgeError("bridge_exited", "Bridge berhenti sebelum siap.")
         self.stop()
         raise BridgeError("timeout", "Bridge tidak siap tepat waktu.")
@@ -94,8 +113,15 @@ class BridgeProcess:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def close(self) -> None:
+        """Stop for good: a start() in progress is aborted and later starts are refused."""
+        with self._lock:
+            self._closed = True
+        self.stop()
+
     def stop(self) -> None:
-        proc = self.proc
+        with self._lock:
+            proc = self.proc
         if proc is None:
             return
         if proc.stdin:
@@ -125,6 +151,8 @@ class BridgeSupervisor:
     """
 
     STABLE_AFTER = 10.0  # seconds alive before the backoff resets
+    # Retrying cannot fix these; the user (or a newer client) must act first.
+    FATAL = frozenset({"unsupported_ios", "protocol_mismatch", "port_in_use", "closed"})
 
     def __init__(self, bridge: BridgeProcess, api: "BridgeHttp", policy: Optional["ReconnectPolicy"] = None,
                  on_event: Optional[Callable[[dict], None]] = None, poll: float = 0.5):
@@ -166,8 +194,16 @@ class BridgeSupervisor:
             try:
                 info = self.bridge.start()
             except BridgeError as exc:
+                if self._stop.is_set():
+                    return False
+                if exc.code in self.FATAL:
+                    self.on_event({"event": "gave_up", "code": exc.code})
+                    return False
                 self.on_event({"event": "restart_failed", "code": exc.code, "message": str(exc)})
                 continue
+            if self._stop.is_set():   # stop() raced the start: do not leave a bridge behind
+                self.bridge.stop()
+                return False
             self.api.rebind(info.port, info.password)
             self._since = time.monotonic()
             self.restarts += 1
@@ -177,7 +213,11 @@ class BridgeSupervisor:
 
     def stop(self) -> None:
         self._stop.set()
-        self.bridge.stop()
+        close = getattr(self.bridge, "close", None) or self.bridge.stop
+        close()
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(5)
 
 
 # --------------------------------------------------------------------------- HTTP
@@ -187,32 +227,41 @@ def _basic(password: str) -> str:
 
 class BridgeHttp:
     def __init__(self, port: int, password: str, host: str = "127.0.0.1"):
-        self.host, self.port, self.auth = host, port, _basic(password)
+        self.host = host
+        self._target = (port, _basic(password), 0)   # replaced as one tuple: readers never mix old and new
         self._local = threading.local()
-        self._gen = 0
+
+    @property
+    def port(self) -> int:
+        return self._target[0]
+
+    @property
+    def auth(self) -> str:
+        return self._target[1]
 
     def rebind(self, port: int, password: str) -> None:
         """Point at a new bridge (after a respawn). Cached keep-alive connections are dropped."""
-        self.port, self.auth = port, _basic(password)
-        self._gen += 1
+        self._target = (port, _basic(password), self._target[2] + 1)
 
     def _conn(self, timeout: float = 10.0) -> http.client.HTTPConnection:
+        port, _, gen = self._target
         conn = getattr(self._local, "conn", None)
-        if conn is not None and getattr(self._local, "gen", -1) != self._gen:
+        if conn is not None and getattr(self._local, "gen", -1) != gen:
             conn.close()
             conn = None
         if conn is None:
-            conn = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
-            self._local.conn, self._local.gen = conn, self._gen
+            conn = http.client.HTTPConnection(self.host, port, timeout=timeout)
+            self._local.conn, self._local.gen = conn, gen
         return conn
 
     def request(self, method: str, path: str, body: Optional[dict] = None, timeout: float = 10.0,
                 keep_alive: bool = False) -> tuple[int, bytes]:
         data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
-        headers = {"Authorization": self.auth}
+        port, auth, _ = self._target
+        headers = {"Authorization": auth}
         if data is not None:
             headers["Content-Type"] = "application/json"
-        conn = self._conn(timeout) if keep_alive else http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+        conn = self._conn(timeout) if keep_alive else http.client.HTTPConnection(self.host, port, timeout=timeout)
         try:
             conn.request(method, path, body=data, headers=headers)
             resp = conn.getresponse()
@@ -237,8 +286,9 @@ class BridgeHttp:
         raise BridgeError("stream_not_ready", "Stream video belum siap.")
 
     def open_stream(self) -> http.client.HTTPResponse:
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=30.0)
-        conn.request("GET", "/stream.bin", headers={"Authorization": self.auth})
+        port, auth, _ = self._target
+        conn = http.client.HTTPConnection(self.host, port, timeout=30.0)
+        conn.request("GET", "/stream.bin", headers={"Authorization": auth})
         resp = conn.getresponse()
         if resp.status != 200:
             body = resp.read()[:200]
@@ -550,6 +600,7 @@ class IOSDevice:
                  extra_args: Optional[list[str]] = None, on_event: Optional[Callable[[dict], None]] = None):
         self.bridge = BridgeProcess(udid, on_status=on_status, extra_args=extra_args)
         self.on_event = on_event
+        self.link_state = "ok"   # ok | reconnecting | gave_up (read by the UI)
         self.supervisor: Optional[BridgeSupervisor] = None
         self.api: Optional[BridgeHttp] = None
         self.video: Optional[VideoSession] = None
@@ -557,12 +608,25 @@ class IOSDevice:
 
     def connect(self) -> BridgeInfo:
         self.api = BridgeHttp(0, "")
-        self.supervisor = BridgeSupervisor(self.bridge, self.api, on_event=self.on_event)
+        self.supervisor = BridgeSupervisor(self.bridge, self.api, on_event=self._on_supervisor_event)
         info = self.supervisor.start_initial()
         self.video = VideoSession(self.api)
         self.input = InputController(self.api)
         self.video.start()
         return info
+
+    def _on_supervisor_event(self, ev: dict) -> None:
+        kind = ev.get("event")
+        if kind == "bridge_down":
+            self.link_state = "reconnecting"
+            if self.video is not None:   # the old stream's hvcC/timestamps do not carry over
+                self.video.stop_recording()
+        elif kind == "restarted":
+            self.link_state = "ok"
+        elif kind == "gave_up":
+            self.link_state = "gave_up"
+        if self.on_event:
+            self.on_event(ev)
 
     def clipboard_get(self) -> dict:
         status, payload = self.api.request("GET", "/clipboard")

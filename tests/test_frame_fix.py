@@ -40,7 +40,7 @@ def test_padding_with_small_codec_noise_still_counts_as_gray():
     pad = a[int(H * 0.5) + 2:, :]
     pad += np.random.default_rng(2).integers(0, 4, pad.shape, dtype=np.uint8)  # 128..131
     fx, fy = ff.detect_content_crop(a)
-    assert fy == pytest.approx(0.5, abs=0.03)
+    assert fx == pytest.approx(0.5, abs=0.03) and fy == pytest.approx(0.5, abs=0.03)
 
 
 def test_only_one_dimension_collapsed_is_ignored():

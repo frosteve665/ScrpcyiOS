@@ -20,10 +20,11 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from frame_fix import DET_H, crop_box, detect_content_crop  # noqa: E402
+from frame_fix import DET_H, CropStabilizer, crop_box  # noqa: E402
 from ios_client import BridgeError, IOSDevice  # noqa: E402
 from player_logic import (  # noqa: E402
-    FUNCTION_ACTIONS, MOD_MASK_WINDOWS, MOD_MASK_X11, KeyState, fit_rect, mod_action, mod_pressed, scroll_swipe,
+    FUNCTION_ACTIONS, MOD_MASK_WINDOWS, MOD_MASK_X11, KeyState, fit_rect, is_mod_key, mod_action, mod_pressed,
+    scroll_swipe,
     window_to_norm,
 )
 
@@ -37,6 +38,8 @@ class Player:
     def __init__(self, dev: IOSDevice, title: str, compensate: bool = True):
         self.dev = dev
         self.compensate = compensate
+        self.crop = CropStabilizer()
+        self._first_frame = True
         self.root = tk.Tk()
         self.root.title(title)
         self.root.geometry("390x844")
@@ -82,6 +85,8 @@ class Player:
         threading.Thread(target=self.dev.input.swipe, args=(x1, y1, x2, y2, 120, 6), daemon=True).start()
 
     def _key_down(self, e) -> None:
+        if is_mod_key(e.keysym):   # Alt is MOD: never typed into the iPhone
+            return
         if mod_pressed(e.state, self.mod_mask):
             act = mod_action(e.keysym, bool(e.state & 0x1))
             if act != "none":
@@ -103,6 +108,8 @@ class Player:
             self.root.after(250, self._pull_clipboard)
 
     def _key_up(self, e) -> None:
+        if is_mod_key(e.keysym):
+            return
         report = self.keys.release(e.keysym)
         if report is not None:
             self.dev.input.keys(report)
@@ -129,8 +136,6 @@ class Player:
             self.root.attributes("-fullscreen", not self.root.attributes("-fullscreen"))
         elif act == "fps":
             self.show_fps = not self.show_fps
-            if not self.show_fps:
-                self.root.title(self.title)
         elif act in ("window-1to1", "window-fit"):
             fw, fh = self.frame_size
             if fw and fh:
@@ -169,7 +174,9 @@ class Player:
             img = f.to_image()
             if self.compensate:  # undo the encoder's "screen shrinks to a corner" during fast swipes
                 small = img.resize((max(8, round(DET_H * img.width / img.height)), DET_H), Image.NEAREST)
-                img = img.crop(crop_box(detect_content_crop(np.asarray(small)), img.width, img.height))
+                frac = self.crop.update(np.asarray(small), time.monotonic(), first=self._first_frame)
+                img = img.crop(crop_box(frac, img.width, img.height))
+            self._first_frame = False
             self.frame_size = (img.width, img.height)
             self.rect = fit_rect(w, h, img.width, img.height)
             x, y, rw, rh = self.rect
@@ -179,8 +186,9 @@ class Player:
             self.canvas.coords(self.img_id, x, y)
         now = time.time()
         if now - self.fps_t >= 1:
-            if self.show_fps:
-                self.root.title(f"{self.title}  {self.fps_n} fps")
+            link = {"reconnecting": "  [menyambung ulang...]", "gave_up": "  [terputus]"}.get(
+                getattr(self.dev, "link_state", "ok"), "")
+            self.root.title(f"{self.title}  {self.fps_n} fps{link}" if self.show_fps else f"{self.title}{link}")
             self.fps_t, self.fps_n = now, 0
         self.root.after(4, self._tick)
 

@@ -86,3 +86,27 @@ def test_mod_shortcut_and_fullscreen_toggle_do_not_crash(player):
     p._action("window-1to1")
     p._action("window-fit")
     p.root.update()
+
+
+def test_mod_sequence_never_sends_alt_to_the_iphone(player):
+    p, m = player
+    pump(p, 0.3)
+    mask = p.mod_mask
+
+    class Ev:
+        def __init__(self, keysym, state):
+            self.keysym, self.state = keysym, state
+    p._key_down(Ev("Alt_L", 0))            # Tk reports the Alt press itself without the Alt bit
+    p._key_down(Ev("v", mask))             # MOD+V = paste
+    p._key_up(Ev("v", mask))
+    p._key_up(Ev("Alt_L", mask))
+    p._key_down(Ev("a", 0))                # a normal key still goes through
+    p._key_up(Ev("a", 0))
+    deadline = time.time() + 3
+    while time.time() < deadline and len([q for q in m.posts if q[0] == "/key"]) < 3:
+        time.sleep(0.02)
+    keys = [b["usages"] for path, b in m.posts if path == "/key"]
+    assert keys, "no /key posts at all"
+    assert all(0xE2 not in k and 0xE6 not in k for k in keys)
+    assert any(0xE3 in k and 0x19 in k for k in keys)          # Cmd+V for the paste
+    assert any(k == [0x04] for k in keys)                        # plain 'a'

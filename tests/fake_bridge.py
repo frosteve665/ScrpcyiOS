@@ -29,6 +29,11 @@ elif mode == "ready_eof":                        # exits gracefully when the cli
     sys.stdin.read()
     sys.exit(0)
 elif mode == "ready_then_die":                   # a bridge that crashes shortly after ready
-    emit(event="ready", port=1234, password="pw", udid="U1", ios="17.5", protocol=1)
+    import os
+    emit(event="ready", port=1000 + os.getpid() % 50000, password="pw", udid="U1", ios="17.5", protocol=1)
     time.sleep(0.3)
     sys.exit(3)
+elif mode == "slow_ready":                       # ready only after 1.5 s (to race stop() against start())
+    time.sleep(1.5)
+    emit(event="ready", port=1234, password="pw", udid="U1", ios="17.5", protocol=1)
+    sys.stdin.read()
