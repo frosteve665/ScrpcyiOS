@@ -11,6 +11,7 @@ Needs: Pillow (pip install pillow); tkinter ships with Python on Windows.
 """
 from __future__ import annotations
 
+import http.client
 import queue
 import sys
 import threading
@@ -116,10 +117,7 @@ class Player:
             return self._action(act)
         ctrl = bool(e.state & 0x4)
         if ctrl and e.keysym.lower() == "v":
-            try:
-                self.dev.clipboard_push(self.root.clipboard_get())
-            except tk.TclError:
-                pass
+            self._sync_before_paste()
         report = self.keys.press(e.keysym, ctrl=ctrl)
         if report is not None:
             self.dev.input.keys(report)
@@ -158,14 +156,20 @@ class Player:
             text = None
         if text is not None and text != self._host_clip:
             self._host_clip = text
-            threading.Thread(target=self._push_quietly, args=(text,), daemon=True).start()
+            self.dev.clipboard_offer(text)   # one ordered background pusher, retried on failure
         self.root.after(self.HOST_CLIP_POLL_MS, self._watch_host_clipboard)
 
-    def _push_quietly(self, text: str) -> None:
+    def _sync_before_paste(self) -> None:
+        """The device must hold the PC clipboard before Cmd+V reaches it (blocks for one POST at most)."""
+        try:
+            text = self.root.clipboard_get()
+        except tk.TclError:   # empty or non-text clipboard
+            return
+        self._host_clip = text
         try:
             self.dev.clipboard_push(text)
-        except OSError:
-            pass   # bridge down; the next change is sent after it is back
+        except (OSError, http.client.HTTPException, BridgeError) as exc:
+            print("clipboard: tidak terkirim:", exc)
 
     def _report_audio(self) -> None:
         audio = getattr(self.dev, "audio", None)
@@ -199,10 +203,7 @@ class Player:
                     cw = max(self.canvas.winfo_width(), 1)
                     self.root.geometry(f"{cw}x{round(cw * fh / fw)}")
         elif act == "paste":
-            try:
-                self.dev.clipboard_push(self.root.clipboard_get())
-            except tk.TclError:
-                pass
+            self._sync_before_paste()
             report = self.keys.press("v", ctrl=True)
             if report is not None:
                 self.dev.input.keys(report)

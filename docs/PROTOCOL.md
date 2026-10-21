@@ -67,7 +67,7 @@ Client (`ClipboardSync`, on by default in the player, `--no-clipboard-autosync` 
 
 ## 6. Audio
 
-`GET /audio.bin` -> chunked body of messages `[u32 BE len][len bytes of s16le 48 kHz stereo PCM]` (one decoded 10 ms AAC-ELD packet per message, ~192 KB/s). **verified (pymobiledevice3 11.40.2 source `screen_stream.py` + `viewer.js`; device untested)**. `503` when audio is unavailable (bridge started with `--no-audio`, or decoder dependencies missing): clients must not retry. `500` if the device audio session fails to start. A slow subscriber loses the oldest packets (server queue of 64). The bridge keeps the device audio session alive after the last subscriber leaves, so reconnecting is cheap.
+`GET /audio.bin` -> chunked body of messages `[u32 BE len][len bytes of s16le 48 kHz stereo PCM]` (one decoded 10 ms AAC-ELD packet per message, ~192 KB/s). **verified (pymobiledevice3 11.40.2 source `screen_stream.py` + `viewer.js`; device untested)**. `503` when the decoder is unavailable (pmd3 `_missing_audio_deps`; on Windows/Linux this means the bridge was started with `--no-audio`, so the FFmpeg patch is not applied, or PyAV/numpy are missing): clients must not retry. `500` if the device audio session fails to start. A slow subscriber loses the oldest packets (server queue of 64). The bridge keeps the device audio session alive after the last subscriber leaves, so reconnecting is cheap.
 
 Client (`AudioSession`): pre-buffers `--audio-buffer` ms (default 50, like scrcpy) in a `JitterBuffer`, plays silence on underrun and re-buffers, drops the oldest audio past `2 x buffer + 100` ms. States: `connecting`, `playing`, `unavailable` (503), `no_output` (no sound card / PortAudio), `stopped`. Audio/video sync and drift: **unverified**.
 

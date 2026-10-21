@@ -38,6 +38,8 @@ class MockBridge:
         self.clip_seq = 0                  # /clipboard/events: device-side copy counter
         self.clip_changed = threading.Condition()
         self.clip_poll = 1.0               # long-poll wait (the real bridge waits 25 s)
+        self.clip_events_body = None       # raw override for /clipboard/events responses
+        self.post_delay = 0.0              # slow down POST /clipboard (ordering races)
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -82,12 +84,15 @@ class MockBridge:
                             outer.clip_changed.wait(outer.clip_poll)
                         fresh = since is not None and since != outer.clip_seq
                         body = {"seq": outer.clip_seq, "text": outer.clip if fresh else None, "image": None}
+                    if outer.clip_events_body is not None:
+                        return self._send(200, outer.clip_events_body)
                     return self._send(200, json.dumps(body).encode())
                 if self.path == "/audio.bin":
                     if outer.audio_status != 200:
                         return self._send(outer.audio_status, b"audio disabled", "text/plain")
                     self.send_response(200)
                     self.send_header("Transfer-Encoding", "chunked")
+                    self.send_header("Connection", "close")   # like pmd3: http.client drops conn.sock
                     self.end_headers()
                     for pcm in outer.audio_msgs:
                         msg = len(pcm).to_bytes(4, "big") + pcm
@@ -100,6 +105,7 @@ class MockBridge:
                 if self.path == "/stream.bin":
                     self.send_response(200)
                     self.send_header("Transfer-Encoding", "chunked")
+                    self.send_header("Connection", "close")
                     self.end_headers()
                     for i, (key, au) in enumerate(outer.aus):
                         msg = frame_msg(2 if i == 0 else (0 if key else 1), au)
@@ -120,6 +126,7 @@ class MockBridge:
                     body = {}
                 outer.posts.append((self.path, body))
                 if self.path == "/clipboard":
+                    time.sleep(outer.post_delay)
                     outer.clip = body.get("text", "")
                     return self._send(200, b'{"ok":true}')
                 if self.path == "/rotate":

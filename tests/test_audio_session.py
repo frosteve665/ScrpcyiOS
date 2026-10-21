@@ -115,7 +115,7 @@ def test_stop_unblocks_a_waiting_reader_and_closes_output(mock):
     assert wait(lambda: s.state == "playing")
     t = time.monotonic()
     s.stop()
-    assert time.monotonic() - t < 2.0
+    assert time.monotonic() - t < 0.5                 # the reader is unblocked, not waited out
     assert not s._thread.is_alive() and fac.outputs[0].closed
 
 
@@ -151,3 +151,55 @@ def test_device_without_audio_or_sync_starts_neither(mock):
     assert dev.audio is None and dev.clipboard is None
     assert dev.clipboard_push("x") is True and mock.clip == "x"   # plain set without sync
     dev.close()
+
+
+def test_stop_while_opening_the_output_closes_it(mock):
+    mock.audio_msgs = [b"\x01" * MS]
+    mock.audio_hold = 3.0
+    fac = Factory()
+
+    def slow(pull):
+        time.sleep(0.4)
+        return fac(pull)
+    s = c.AudioSession(c.BridgeHttp(mock.port, PASSWORD), output_factory=slow)
+    s.start()
+    assert wait(lambda: len(audio_hits(mock)) == 1)
+    time.sleep(0.1)
+    s.stop()
+    assert wait(lambda: fac.outputs and fac.outputs[0].closed)
+    assert s.state == "stopped"
+
+
+def test_unexpected_error_restarts_the_stream_instead_of_killing_audio(mock):
+    mock.audio_msgs = [b"\x01" * MS] * 3
+    fac = Factory()
+    s = c.AudioSession(c.BridgeHttp(mock.port, PASSWORD), output_factory=fac)
+    real, calls = s.jitter.push, []
+
+    def flaky(pcm):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        real(pcm)
+    s.jitter.push = flaky
+    s.start()
+    try:
+        assert wait(lambda: len(audio_hits(mock)) >= 2 and s._thread.is_alive())
+        assert "boom" in (s.last_error or "")
+    finally:
+        s.stop()
+
+
+def test_device_close_is_fast_with_silent_audio_and_a_pending_long_poll(mock):
+    mock.audio_msgs = []
+    mock.audio_hold = 20.0
+    mock.clip_poll = 20.0
+    dev = c.IOSDevice(audio=True, on_device_clipboard=lambda t: None, audio_output=Factory())
+    dev.api = c.BridgeHttp(mock.port, PASSWORD)
+    dev._start_media()
+    assert wait(lambda: dev.audio.state == "playing")
+    assert wait(lambda: len([h for h in mock.hits if h.startswith("/clipboard/events")]) >= 2)
+    t = time.monotonic()
+    dev.close()
+    assert time.monotonic() - t < 0.5
+    assert not dev.audio._thread.is_alive() and not dev.clipboard._thread.is_alive()

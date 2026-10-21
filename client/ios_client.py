@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -244,6 +245,15 @@ class BridgeSupervisor:
 
 
 # --------------------------------------------------------------------------- HTTP
+def abort_socket(sock: Optional[socket.socket]) -> None:
+    """Unblock a thread waiting on this socket (stop() of a streaming reader or a long-poll)."""
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+
 def _basic(password: str) -> str:
     return "Basic " + base64.b64encode(f":{password}".encode()).decode()
 
@@ -278,7 +288,9 @@ class BridgeHttp:
         return conn
 
     def request(self, method: str, path: str, body: Optional[dict] = None, timeout: float = 10.0,
-                keep_alive: bool = False) -> tuple[int, bytes]:
+                keep_alive: bool = False,
+                on_socket: Optional[Callable[[Optional[socket.socket]], None]] = None) -> tuple[int, bytes]:
+        """on_socket(sock) is called once the request is sent, so another thread can abort_socket() it."""
         data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
         port, auth, _ = self._target
         headers = {"Authorization": auth}
@@ -287,6 +299,8 @@ class BridgeHttp:
         conn = self._conn(timeout) if keep_alive else http.client.HTTPConnection(self.host, port, timeout=timeout)
         try:
             conn.request(method, path, body=data, headers=headers)
+            if on_socket is not None:
+                on_socket(conn.sock)
             resp = conn.getresponse()
             payload = resp.read()
             return resp.status, payload
@@ -312,7 +326,9 @@ class BridgeHttp:
         port, auth, _ = self._target
         conn = http.client.HTTPConnection(self.host, port, timeout=30.0)
         conn.request("GET", path, headers={"Authorization": auth})
+        sock = conn.sock   # with "Connection: close" (pmd3) getresponse() sets conn.sock to None
         resp = conn.getresponse()
+        resp._strikemirror_sock = sock
         if resp.status != 200:
             body = resp.read()[:200]
             conn.close()
@@ -460,11 +476,8 @@ class AudioSession:
     def stop(self) -> None:
         self._stop.set()
         resp = self._resp
-        if resp is not None:   # unblock a read waiting for the next packet
-            try:
-                resp._strikemirror_conn.sock.shutdown(2)
-            except (AttributeError, OSError):
-                pass
+        if resp is not None:   # unblock a read waiting for the next packet (the device may be silent)
+            abort_socket(resp._strikemirror_sock)
         t = self._thread
         if t is not None and t is not threading.current_thread():
             t.join(3)
@@ -489,24 +502,31 @@ class AudioSession:
             else:
                 self._resp = resp
                 try:
+                    if self._stop.is_set():
+                        return
                     if self._output is None:
                         try:
-                            self._output = self.output_factory(self.jitter.pull)
+                            out = self.output_factory(self.jitter.pull)
                         except Exception as exc:  # no sound card / no PortAudio: audio off, video on
                             self.last_error = f"audio output: {exc}"
                             self.state = "no_output"
                             return
+                        if self._stop.is_set():   # stop() ran while the sound card was opening
+                            out.close()
+                            return
+                        self._output = out
                     self.state = "playing"
                     reconnect.on_success()
                     for pcm in iter_audio(resp.read1 if hasattr(resp, "read1") else resp.read):
                         if self._stop.is_set():
                             return
                         self.jitter.push(pcm)
-                except (OSError, ValueError, http.client.HTTPException, BridgeError) as exc:
+                except Exception as exc:   # anything else: drop this stream and reconnect
                     self.last_error = str(exc)
                 finally:
                     self._resp = None
                     resp._strikemirror_conn.close()
+                    resp.close()
             if self._stop.wait(reconnect.next_delay()):
                 return
 
@@ -515,64 +535,129 @@ class ClipboardSync:
     """Two-way clipboard sync (scrcpy's default behaviour).
 
     Device -> host: long-polls GET /clipboard/events?since=seq and calls on_device_text(text)
-    for each copy made on the iPhone after sync started. Host -> device: push_host_text(text).
-    The last text seen on either side is remembered, so neither direction echoes the other.
+    for each copy made on the iPhone after sync started.
+    Host -> device: offer_host_text() (async, from a clipboard watcher) or push_host_text()
+    (blocking, before a paste). Pushes are serialised and always send the NEWEST wanted text,
+    so a slow push can never overwrite a newer one; a failed push is retried.
+    The last text synced in either direction is remembered, so neither side echoes the other.
     """
 
-    def __init__(self, http_api: BridgeHttp, on_device_text: Callable[[str], None], poll_timeout: float = 35.0):
+    def __init__(self, http_api: BridgeHttp, on_device_text: Callable[[str], None],
+                 poll_timeout: float = 35.0, retry: float = 1.0):
         self.api = http_api
         self.on_device_text = on_device_text
         self.poll_timeout = poll_timeout   # the bridge answers after at most 25 s
-        self._last: Optional[str] = None
-        self._lock = threading.Lock()
+        self.retry = retry
+        self._last: Optional[str] = None   # text both sides agree on
+        self._want: Optional[str] = None   # newest host text the device should get
+        self._lock = threading.Lock()      # guards _last/_want
+        self._push_lock = threading.Lock() # one POST at a time
+        self._wake = threading.Event()
+        self._sock: Optional[socket.socket] = None
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._pusher: Optional[threading.Thread] = None
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True, name="clipboard")
+        self._pusher = threading.Thread(target=self._push_loop, daemon=True, name="clipboard-push")
         self._thread.start()
+        self._pusher.start()
 
     def stop(self) -> None:
         self._stop.set()
-        t = self._thread
-        if t is not None and t is not threading.current_thread():
-            t.join(2)
+        self._wake.set()
+        abort_socket(self._sock)   # the long-poll may wait up to 25 s for a device copy
+        for t in (self._thread, self._pusher):
+            if t is not None and t is not threading.current_thread():
+                t.join(2)
+
+    def offer_host_text(self, text: str) -> None:
+        """The PC clipboard changed: send it to the device in the background."""
+        with self._lock:
+            self._want = text
+        self._wake.set()
 
     def push_host_text(self, text: str) -> bool:
-        """Send a host clipboard change to the device; False if it is the text we already synced."""
+        """Make sure the device holds `text` before returning (e.g. right before Cmd+V).
+
+        Returns True if it was sent now, False if the device already had it. Raises OSError /
+        http.client.HTTPException if the bridge cannot be reached (it is retried in the background).
+        """
         with self._lock:
-            if text == self._last:
-                return False
-            self._last = text
-        status, _ = self.api.request("POST", "/clipboard", {"text": text})
-        return status == 200
+            self._want = text
+        try:
+            return self._flush()
+        finally:
+            self._wake.set()
+
+    def _flush(self) -> bool:
+        with self._push_lock:
+            with self._lock:
+                text = self._want
+                if text is None or text == self._last:
+                    return False
+            status, _ = self.api.request("POST", "/clipboard", {"text": text})
+            if status != 200:
+                raise BridgeError("clipboard_http", f"POST /clipboard -> {status}", status=status)
+            with self._lock:
+                self._last = text
+            return True
+
+    def _push_loop(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait()
+            self._wake.clear()
+            if self._stop.is_set():
+                return
+            try:
+                self._flush()
+            except Exception:   # bridge down or restarting: try again shortly
+                if self._stop.wait(self.retry):
+                    return
+                self._wake.set()
+
+    def _remember_socket(self, sock: Optional[socket.socket]) -> None:
+        self._sock = sock
+        if self._stop.is_set():
+            abort_socket(sock)
 
     def _run(self) -> None:
-        backoff = ReconnectPolicy(base=1.0, cap=30.0)
+        backoff = ReconnectPolicy(base=self.retry, cap=30.0)
         since: Optional[int] = None
         while not self._stop.is_set():
             path = "/clipboard/events" if since is None else f"/clipboard/events?since={since}"
             try:
-                status, payload = self.api.request("GET", path, timeout=self.poll_timeout)
+                status, payload = self.api.request("GET", path, timeout=self.poll_timeout,
+                                                   on_socket=self._remember_socket)
                 if status != 200:
                     raise BridgeError("clipboard_http", f"{path} -> {status}", status=status)
                 ev = json.loads(payload)
-            except (OSError, ValueError, http.client.HTTPException, BridgeError):
+                seq, text = ev["seq"], ev.get("text")
+                if not isinstance(seq, int):
+                    raise ValueError(f"bad seq {seq!r}")
+            except Exception:
+                if self._stop.is_set():
+                    return
                 since = None   # a respawned bridge numbers copies from scratch
                 if self._stop.wait(backoff.next_delay()):
                     return
                 continue
+            finally:
+                self._sock = None
             if self._stop.is_set():   # a long-poll can outlive stop(); never call back after it
                 return
             backoff.on_success()
-            text = ev.get("text")
             if since is not None and isinstance(text, str):
                 with self._lock:
                     fresh = text != self._last
-                    self._last = text
+                    self._last = self._want = text   # a pending older host text must not overwrite it
                 if fresh:
-                    self.on_device_text(text)
-            since = ev.get("seq", since)
+                    try:
+                        self.on_device_text(text)
+                    except Exception:
+                        pass
+            since = seq
 
 
 # --------------------------------------------------------------------------- decoding
@@ -904,6 +989,11 @@ class IOSDevice:
     def clipboard_set(self, text: str) -> bool:
         status, _ = self.api.request("POST", "/clipboard", {"text": text})
         return status == 200
+
+    def clipboard_offer(self, text: str) -> None:
+        """Host clipboard changed: sync it in the background (no-op without clipboard sync)."""
+        if self.clipboard is not None:
+            self.clipboard.offer_host_text(text)
 
     def clipboard_push(self, text: str) -> bool:
         """Host clipboard -> device; with sync on, unchanged text is not resent (returns False)."""
