@@ -146,7 +146,8 @@ def main() -> int:
     ap.add_argument("--no-audio", action="store_true", default=True)
     args = ap.parse_args()
     dev = IOSDevice(args.udid, on_status=lambda ev: print("·", ev.get("phase"), ev.get("note") or ""),
-                    extra_args=["--no-audio"] if args.no_audio else [])
+                    extra_args=["--no-audio"] if args.no_audio else [],
+                    on_event=lambda ev: print("!", ev.get("event"), ev.get("code") or ""))
     try:
         info = dev.connect()
     except BridgeError as exc:

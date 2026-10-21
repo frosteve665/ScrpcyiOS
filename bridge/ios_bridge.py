@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import os
 import secrets
 import socket
 import sys
+import threading
 
 DISPLAY_SERVICE = "com.apple.coredevice.displayservice"
 PROTOCOL_VERSION = 1
@@ -56,6 +58,8 @@ def classify(exc: BaseException) -> BridgeError:
         return exc
     name, text = type(exc).__name__, str(exc)
     low = text.lower()
+    if isinstance(exc, OSError) and exc.errno in (errno.EADDRINUSE, 10048):  # 10048 = WSAEADDRINUSE
+        return BridgeError("port_in_use", "Port bridge sedang dipakai proses lain.")
     if name in {"ConnectionFailedToUsbmuxdError", "MuxException"} or "27015" in text or "usbmux" in low:
         return BridgeError("driver_missing")
     if name == "DeviceNotFoundError":
@@ -82,6 +86,29 @@ def parse_version(text: str) -> tuple[int, ...]:
 def check_ios_version(version: str) -> None:
     if parse_version(version) < (17, 4, 0):
         raise BridgeError("unsupported_ios", f"iOS {version} terlalu lama. Butuh iOS 17.4 atau lebih baru.")
+
+
+def watch_stdin(stream, on_eof) -> threading.Thread:
+    """Call on_eof when the parent closes our stdin (it exited or crashed). Data is ignored.
+
+    This is how an orphaned bridge dies on every platform, with no pid polling.
+    """
+    def pump() -> None:
+        try:
+            while stream.read(1024):
+                pass
+        except (OSError, ValueError):
+            pass
+        on_eof()
+
+    t = threading.Thread(target=pump, daemon=True, name="stdin-watch")
+    t.start()
+    return t
+
+
+def _die_with_parent() -> None:
+    emit("status", phase="stopped", reason="parent_gone")
+    os._exit(0)
 
 
 def free_port() -> int:
@@ -172,10 +199,13 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="StrikeMirror iOS bridge")
     p.add_argument("--udid")
     p.add_argument("--port", type=int, default=0)
+    p.add_argument("--exit-on-stdin-eof", action="store_true", help="exit when the parent closes stdin")
     p.add_argument("--no-audio", action="store_true")
     p.add_argument("--no-motion-idr", action="store_true")
     p.add_argument("--max-bitrate", type=int, default=60000, help="kbps cap advertised to the iPhone")
     args = p.parse_args(argv)
+    if args.exit_on_stdin_eof:
+        watch_stdin(sys.stdin, _die_with_parent)
     try:
         asyncio.run(run(args))
     except KeyboardInterrupt:

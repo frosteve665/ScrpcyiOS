@@ -23,3 +23,12 @@ elif mode == "exit":
     sys.exit(0)
 elif mode == "hang":
     time.sleep(30)
+
+elif mode == "ready_eof":                        # exits gracefully when the client closes stdin
+    emit(event="ready", port=1234, password="pw", udid="U1", ios="17.5", protocol=1)
+    sys.stdin.read()
+    sys.exit(0)
+elif mode == "ready_then_die":                   # a bridge that crashes shortly after ready
+    emit(event="ready", port=1234, password="pw", udid="U1", ios="17.5", protocol=1)
+    time.sleep(0.3)
+    sys.exit(3)
