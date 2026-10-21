@@ -43,3 +43,10 @@ def test_checker_detects_drift():
 
 def test_bridge_dependencies_still_exist():
     assert missing(CONTRACT) == []
+
+
+def test_screen_stream_audio_hooks_exist_for_portable_audio():
+    """bridge/audio_portable.py patches these two names; fail loudly if pymobiledevice3 renames them."""
+    import pymobiledevice3.remote.core_device.screen_stream as ss
+    assert hasattr(ss, "AACELDDecoder") and hasattr(ss, "AAC_ELD_ASC_48K_STEREO_480")
+    assert callable(getattr(ss.ScreenStreamServer, "_missing_audio_deps", None))

@@ -47,7 +47,12 @@ def emit(event: str, **fields) -> None:
     try:
         print(json.dumps({"event": event, **fields}, ensure_ascii=False), flush=True)
     except (OSError, ValueError):
-        pass
+        # Reader is gone. Point stdout at devnull so the interpreter's final flush cannot fail
+        # either (otherwise Python exits with code 120 instead of our own exit code).
+        try:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            pass
 
 
 class BridgeError(Exception):
@@ -209,6 +214,12 @@ async def run(args) -> None:
     from pymobiledevice3.remote.core_device.screen_stream import ScreenStreamServer
     from pymobiledevice3.remote.rsd_tunnel import PreferredRsdTunnel
     from pymobiledevice3.services.mobile_image_mounter import auto_mount
+
+    if not args.no_audio:
+        import pymobiledevice3.remote.core_device.screen_stream as screen_stream_module
+
+        from audio_portable import enable_portable_audio
+        enable_portable_audio(screen_stream_module)  # Windows/Linux: FFmpeg AAC-ELD instead of AudioToolbox
 
     emit("status", phase="detecting")
     udid = await pick_device(args.udid)

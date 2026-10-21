@@ -345,6 +345,76 @@ def iter_frames(read: Callable[[int], bytes]) -> Iterator[tuple[int, bytes]]:
         yield body[0], body[1:]
 
 
+def iter_audio(read: Callable[[int], bytes]) -> Iterator[bytes]:
+    """Parse /audio.bin messages: [4B BE len][len bytes of s16le 48 kHz stereo PCM]."""
+    def exact(n: int) -> Optional[bytes]:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = read(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return bytes(buf)
+
+    while True:
+        head = exact(4)
+        if head is None:
+            return
+        length = int.from_bytes(head, "big")
+        if length > 16 * 1024 * 1024:
+            raise BridgeError("bad_frame", f"Panjang audio tidak masuk akal: {length}")
+        body = exact(length)
+        if body is None:
+            return
+        yield body
+
+
+class JitterBuffer:
+    """PCM playout buffer (s16le 48 kHz stereo = 192 bytes per ms), thread-safe.
+
+    Pre-buffers to target_ms before playing (like scrcpy --audio-buffer), returns silence on
+    underrun and re-buffers, and drops the oldest audio when latency would exceed max_ms.
+    """
+
+    BYTES_PER_MS = 192
+
+    def __init__(self, target_ms: int = 50, max_ms: int = 200):
+        self.target = target_ms * self.BYTES_PER_MS
+        self.max = max_ms * self.BYTES_PER_MS
+        self._buf = bytearray()
+        self._playing = False
+        self._lock = threading.Lock()
+        self.underruns = 0
+        self.dropped_bytes = 0
+
+    def push(self, pcm: bytes) -> None:
+        with self._lock:
+            self._buf += pcm
+            if len(self._buf) > self.max:
+                drop = len(self._buf) - self.target
+                drop -= drop % 4                      # keep stereo s16 frames aligned
+                del self._buf[:drop]
+                self.dropped_bytes += drop
+            if not self._playing and len(self._buf) >= self.target:
+                self._playing = True
+
+    def pull(self, n: int) -> bytes:
+        with self._lock:
+            if not self._playing:
+                return bytes(n)
+            out = bytes(self._buf[:n])
+            del self._buf[:n]
+            if len(out) < n:
+                self.underruns += 1
+                self._playing = False
+                out += bytes(n - len(out))
+            return out
+
+    def buffered_ms(self) -> float:
+        with self._lock:
+            return len(self._buf) / self.BYTES_PER_MS
+
+
 # --------------------------------------------------------------------------- decoding
 class HevcDecoder:
     """HEVC (hvcC) decoder on PyAV. Frames arrive as length-prefixed NALUs."""

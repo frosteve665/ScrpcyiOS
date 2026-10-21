@@ -35,10 +35,10 @@ except ImportError:  # pragma: no cover
 
 
 class Player:
-    def __init__(self, dev: IOSDevice, title: str, compensate: bool = True):
+    def __init__(self, dev: IOSDevice, title: str, compensate: bool = True, crop_hold: float = 1.0):
         self.dev = dev
         self.compensate = compensate
-        self.crop = CropStabilizer()
+        self.crop = CropStabilizer(max_hold=crop_hold)
         self._first_frame = True
         self.root = tk.Tk()
         self.root.title(title)
@@ -203,6 +203,8 @@ class Player:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--udid")
+    ap.add_argument("--crop-hold", type=float, default=1.0,
+                    help="detik maksimum layar menyusut dianggap sementara (naikkan untuk aim-drag panjang)")
     ap.add_argument("--no-compensate", action="store_true", help="jangan regangkan layar yang menyusut saat swipe cepat")
     ap.add_argument("--no-audio", action="store_true", default=True)
     args = ap.parse_args()
@@ -214,7 +216,8 @@ def main() -> int:
     except BridgeError as exc:
         print(f"[{exc.code}] {exc}")
         return 3  # distinct exit code: the frozen smoke test relies on it
-    Player(dev, f"StrikeMirror iOS — {info.ios}", compensate=not args.no_compensate).run()
+    Player(dev, f"StrikeMirror iOS — {info.ios}", compensate=not args.no_compensate,
+           crop_hold=args.crop_hold).run()
     return 0
 
 

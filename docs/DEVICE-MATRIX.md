@@ -11,5 +11,7 @@ Isi dari hasil nyata. Jangan tulis klaim yang belum diuji.
 - [ ] Tutup paksa player: proses bridge ikut mati (tidak ada `python.exe` yatim).
 - [ ] Putar iPhone ke landscape (F6/F7): gambar tegak dan tap mendarat di titik yang benar.
 - [ ] Swipe cepat di game: layar tidak menyusut ke pojok (kompensasi crop aktif); coba juga `--no-compensate`.
+- [ ] Ukur berapa detik layar tetap menyusut selama aim-drag terus-menerus; setel `--crop-hold` (default 1.0 s) dari angka itu.
+- [ ] Versi `.exe` (artefak CI `ScrpcyiOS-windows-x64`) berjalan di PC tanpa Python terpasang.
 - [ ] Shortcut MOD (Alt): Q, F, H, P, Up/Down, Left/Right, G, W, I, V; F11 fullscreen; klik tengah = Home.
 - [ ] File log terbentuk di `%LOCALAPPDATA%\StrikeMirror\logs` dan berputar.
